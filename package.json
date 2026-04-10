@@ -1,0 +1,23 @@
+{
+  "name": "back-ai-ethic",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start:dev": "cross-env NODE_ENV=development node server.js",
+    "start:uat": "cross-env NODE_ENV=uat node server.js",
+    "start:prod": "cross-env NODE_ENV=production node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "cross-env": "^10.1.0",
+    "dotenv": "^17.4.1",
+    "express": "^5.2.1",
+    "swagger-ui-express": "^5.0.1"
+  }
+}
