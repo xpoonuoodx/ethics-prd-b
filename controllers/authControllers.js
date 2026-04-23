@@ -1,0 +1,331 @@
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const db = require("../db"); // เชื่อมต่อกับ Neon (pg pool)
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
+const { google } = require("googleapis");
+
+// --- ตั้งค่า OAuth2 สำหรับ Gmail ---
+const oAuth2Client = new google.auth.OAuth2(
+  process.env.MYAPP_CLIENT_ID,
+  process.env.MYAPP_CLIENT_SECRET,
+  process.env.MYAPP_REDIRECT_URI,
+);
+oAuth2Client.setCredentials({ refresh_token: process.env.MYAPP_REFRESH_TOKEN });
+
+/**
+ * ฟังก์ชันหลักสำหรับส่งอีเมลผ่าน OAuth2
+ */
+async function sendMail(email, subject, html) {
+  try {
+    const accessToken = await oAuth2Client.getAccessToken();
+
+    const transport = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        type: "OAuth2",
+        user: process.env.MYAPP_GOOGLE_EMAIL,
+        clientId: process.env.MYAPP_CLIENT_ID,
+        clientSecret: process.env.MYAPP_CLIENT_SECRET,
+        refreshToken: process.env.MYAPP_REFRESH_TOKEN,
+        accessToken: accessToken.token,
+      },
+    });
+
+    const mailOptions = {
+      from: `"Ethic System" <${process.env.MYAPP_GOOGLE_EMAIL}>`,
+      to: email,
+      subject: subject,
+      html: html,
+    };
+
+    return await transport.sendMail(mailOptions);
+  } catch (error) {
+    console.error("Error sending email via OAuth2:", error);
+    throw error;
+  }
+}
+
+// --- 1. LOGIN ---
+exports.login = async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    // JOIN ข้อมูลจากตาราง users และ profiles
+    const result = await db.query(
+      `SELECT u.id, u.username, u.password, u.role, 
+              p.is_verified, p.first_name_th, p.last_name_th, p.user_code 
+       FROM users u 
+       JOIN profiles p ON u.id = p.user_id 
+       WHERE u.username = $1`,
+      [username],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(401)
+        .json({ message: "ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง" });
+    }
+
+    const user = result.rows[0];
+
+    // ตรวจสอบสถานะการยืนยันอีเมล
+    if (!user.is_verified) {
+      return res.status(403).json({
+        message: "บัญชีของคุณยังไม่ได้ยืนยันตัวตน กรุณาตรวจสอบอีเมลของคุณ",
+      });
+    }
+
+    // ตรวจสอบรหัสผ่าน
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res
+        .status(401)
+        .json({ message: "ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง" });
+    }
+
+    // สร้าง Token
+    const token = jwt.sign(
+      { id: user.id, role: user.role },
+      process.env.MYAPP_JWT_SECRET,
+      { expiresIn: "1d" },
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        user_code: user.user_code,
+        username: user.username,
+        name: `${user.first_name_th} ${user.last_name_th}`,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("Login Error:", error);
+    res.status(500).json({ message: "เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล" });
+  }
+};
+
+// --- 2. REGISTER ---
+exports.register = async (req, res) => {
+  const { id_card, first_name, last_name, phone, email, username, password } =
+    req.body;
+
+  const client = await db.connect(); // ใช้ client เพื่อทำ Transaction
+
+  try {
+    await client.query("BEGIN"); // เริ่ม Transaction
+
+    // ตรวจสอบ Username ซ้ำในตาราง users
+    const checkUsername = await client.query(
+      "SELECT username FROM users WHERE username = $1",
+      [username],
+    );
+    if (checkUsername.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ message: "ชื่อผู้ใช้งาน (Username) นี้ถูกใช้งานแล้ว" });
+    }
+
+    // ตรวจสอบ Email หรือ เลขบัตรประชาชน ซ้ำในตาราง profiles
+    const checkProfile = await client.query(
+      "SELECT email, id_card FROM profiles WHERE email = $1 OR id_card = $2",
+      [email, id_card],
+    );
+    if (checkProfile.rows.length > 0) {
+      await client.query("ROLLBACK");
+      const existingProfile = checkProfile.rows[0];
+      if (existingProfile.id_card === id_card) {
+        return res
+          .status(400)
+          .json({ message: "เลขประจำตัวประชาชนนี้ถูกลงทะเบียนแล้ว" });
+      }
+      if (existingProfile.email === email) {
+        return res.status(400).json({ message: "อีเมลนี้ถูกใช้งานแล้ว" });
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const verificationToken = crypto.randomBytes(32).toString("hex");
+
+    // 1. บันทึกลงตาราง users และดึง id กลับมา
+    const userInsertResult = await client.query(
+      `INSERT INTO users (username, password, role) 
+       VALUES ($1, $2, $3) RETURNING id`,
+      [username, hashedPassword, "user"],
+    );
+    const newUserId = userInsertResult.rows[0].id;
+
+    // --- สร้าง Format ID (เช่น USR-2604-00001) ---
+    const date = new Date();
+    const yy = String(date.getFullYear()).slice(-2);
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const paddedId = String(newUserId).padStart(5, "0");
+    const userCode = `USR-${yy}${mm}-${paddedId}`;
+
+    // 2. บันทึกลงตาราง profiles
+    await client.query(
+      `INSERT INTO profiles 
+       (user_id, user_code, first_name_th, last_name_th, mobile, email, id_card, verification_token, is_verified) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        newUserId,
+        userCode,
+        first_name,
+        last_name,
+        phone,
+        email,
+        id_card,
+        verificationToken,
+        false,
+      ],
+    );
+
+    await client.query("COMMIT"); // ยืนยันการบันทึกข้อมูลทั้งสองตาราง
+
+    // สร้าง HTML สำหรับอีเมล
+    const verificationUrl = `${process.env.MYAPP_BACKEND_URL}/auth/verify-email?token=${verificationToken}`;
+    const html = `
+      <div style="font-family: 'Kanit', sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 15px; max-width: 600px;">
+        <h2 style="color: #2d6a4f; text-align: center;">ยินดีต้อนรับสู่ระบบ Ethic AI System+</h2>
+        <p>คุณได้ทำการลงทะเบียนสำเร็จแล้ว รหัสผู้ใช้งานของคุณคือ <b>${userCode}</b></p>
+        <p>เพื่อความปลอดภัยและเปิดใช้งานบัญชีของคุณ กรุณาคลิกปุ่มด้านล่าง:</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${verificationUrl}" style="background-color: #56ab2f; color: white; padding: 14px 30px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 16px;">ยืนยันตัวตนทันที</a>
+        </div>
+        <p style="color: #7f8c8d; font-size: 13px;">หากคุณไม่ได้ทำการสมัครสมาชิก กรุณาเพิกเฉยต่ออีเมลฉบับนี้</p>
+        <hr style="border: 0; border-top: 1px solid #eee;">
+        <p style="text-align: center; font-size: 12px; color: #bdc3c7;">© 2026 GAP+ System | DOAE</p>
+      </div>
+    `;
+
+    // ส่งอีเมล
+    try {
+      await sendMail(email, "ยืนยันการลงทะเบียนระบบ Ethic AI System", html);
+    } catch (mailError) {
+      console.error("Mail Delivery Failed:", mailError);
+    }
+
+    res
+      .status(201)
+      .json({ message: "ลงทะเบียนสำเร็จ กรุณาตรวจสอบอีเมลเพื่อยืนยันตัวตน" });
+  } catch (error) {
+    await client.query("ROLLBACK"); // หากพังกลางคัน ให้ยกเลิกการบันทึกทั้งหมด
+    console.error("Register Error:", error);
+    res.status(500).json({ message: "เกิดข้อผิดพลาดในการลงทะเบียน" });
+  } finally {
+    client.release(); // คืน Connection กลับสู่ Pool
+  }
+};
+
+// --- 3. VERIFY EMAIL ---
+exports.verifyEmail = async (req, res) => {
+  const { token } = req.query;
+  try {
+    const result = await db.query(
+      "SELECT id FROM profiles WHERE verification_token = $1",
+      [token],
+    );
+
+    if (result.rows.length === 0) {
+      return res.redirect(
+        `${process.env.MYAPP_FRONTEND_URL}/login?error=invalid_token`,
+      );
+    }
+
+    // อัปเดตเฉพาะตาราง profiles
+    await db.query(
+      "UPDATE profiles SET is_verified = true, verification_token = NULL WHERE id = $1",
+      [result.rows[0].id],
+    );
+
+    res.redirect(`${process.env.MYAPP_FRONTEND_URL}/login?status=verified`);
+  } catch (error) {
+    console.error("Verification Error:", error);
+    res.redirect(`${process.env.MYAPP_FRONTEND_URL}/login?error=server_error`);
+  }
+};
+
+// --- FORGOT PASSWORD (ส่งอีเมล) ---
+exports.forgotPassword = async (req, res) => {
+  const { email } = req.body;
+  try {
+    const result = await db.query("SELECT id FROM profiles WHERE email = $1", [
+      email,
+    ]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "ไม่พบอีเมลนี้ในระบบ" });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString("hex");
+
+    // บันทึก Token ลงตาราง profiles
+    await db.query("UPDATE profiles SET reset_token = $1 WHERE email = $2", [
+      resetToken,
+      email,
+    ]);
+
+    const resetUrl = `${process.env.MYAPP_FRONTEND_URL}/reset-password?token=${resetToken}`;
+    const html = `
+      <div style="font-family: 'Kanit', sans-serif; padding: 20px;">
+        <h2>แจ้งลืมรหัสผ่าน</h2>
+        <p>คุณได้ทำการขอเปลี่ยนรหัสผ่านใหม่ กรุณาคลิกปุ่มด้านล่าง:</p>
+        <a href="${resetUrl}" style="background: #2d6a4f; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">ตั้งรหัสผ่านใหม่</a>
+        <p>หากคุณไม่ได้เป็นคนขอ กรุณาเพิกเฉยต่ออีเมลฉบับนี้</p>
+      </div>
+    `;
+
+    await sendMail(email, "เปลี่ยนรหัสผ่านใหม่ - Ethic AI", html);
+    res.json({ message: "ส่งอีเมลเรียบร้อยแล้ว" });
+  } catch (error) {
+    console.error("Forgot Password Error:", error);
+    res.status(500).json({ message: "เกิดข้อผิดพลาดในการส่งอีเมล" });
+  }
+};
+
+// --- RESET PASSWORD (เปลี่ยนรหัสผ่านจริง) ---
+exports.resetPassword = async (req, res) => {
+  const { token, newPassword } = req.body;
+  const client = await db.connect(); // ใช้ Transaction
+
+  try {
+    // หา user_id จากตาราง profiles ด้วย token
+    const result = await client.query(
+      "SELECT user_id FROM profiles WHERE reset_token = $1",
+      [token],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ message: "Token ไม่ถูกต้องหรือหมดอายุ" });
+    }
+
+    const userId = result.rows[0].user_id;
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    await client.query("BEGIN");
+
+    // 1. อัปเดตรหัสผ่านใหม่ในตาราง users
+    await client.query("UPDATE users SET password = $1 WHERE id = $2", [
+      hashedPassword,
+      userId,
+    ]);
+
+    // 2. เคลียร์ reset_token ในตาราง profiles
+    await client.query(
+      "UPDATE profiles SET reset_token = NULL WHERE reset_token = $1",
+      [token],
+    );
+
+    await client.query("COMMIT");
+
+    res.json({ message: "เปลี่ยนรหัสผ่านสำเร็จ" });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Reset Password Error:", error);
+    res.status(500).json({ message: "ไม่สามารถเปลี่ยนรหัสผ่านได้" });
+  } finally {
+    client.release();
+  }
+};

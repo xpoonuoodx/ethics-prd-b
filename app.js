@@ -1,8 +1,8 @@
 const express = require("express");
 const cors = require("cors");
-// const { swaggerUi, swaggerSpec } = require("./config/swagger");
+const { swaggerUi, swaggerSpec } = require("./config/swagger");
 
-// const authRoutes = require("./routes/authRoutes");
+const authRoutes = require("./routes/authRoutes");
 // const userRoutes = require("./routes/userRoutes");
 // const adminRoutes = require("./routes/adminRoutes");
 // const masterRoutes = require('./routes/masterRoutes');
@@ -27,15 +27,15 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Swagger documentation
-// app.use(
-//   "/api-docs",
-//   swaggerUi.serve,
-//   swaggerUi.setup(swaggerSpec, { explorer: true }),
-// );
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, { explorer: true }),
+);
 
 // Routes
 // app.use('/', homeRoutes);
-// app.use("/auth", authRoutes);
+app.use("/auth", authRoutes);
 // app.use("/user", userRoutes);
 // app.use("/admin", adminRoutes);
 // app.use('/master', masterRoutes);
