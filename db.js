@@ -1,10 +1,9 @@
 // db.js
-const { Pool, types } = require("pg"); // [UPDATE] นำเข้า types เพิ่มเติม
+const { Pool, types } = require("pg");
 require("dotenv").config();
 require("dotenv").config({ path: `.env.${process.env.NODE_ENV}` });
 
-// [NEW] สั่งให้ไลบรารี pg ไม่ต้องแปลงวันที่เป็น Date Object
-// รหัส 1114 คือ timestamp, 1184 คือ timestamptz, 1082 คือ date
+// สั่งให้ไลบรารี pg ไม่ต้องแปลงวันที่เป็น Date Object
 // ให้ส่งค่ากลับมาเป็น String ดิบๆ เลย หน้าบ้านจะได้เอาไปโชว์ตรงๆ ไม่โดนบวก 7 ชม.
 types.setTypeParser(1114, (stringValue) => stringValue);
 types.setTypeParser(1184, (stringValue) => stringValue);
@@ -21,17 +20,13 @@ const pool = new Pool({
   },
 });
 
-// บังคับให้ฐานข้อมูลใช้เวลาไทยทุกครั้งที่มีการเชื่อมต่อ
-pool.on("connect", (client) => {
-  client.query("SET TIME ZONE 'Asia/Bangkok'");
-});
-
+// ทดสอบการเชื่อมต่อเมื่อเริ่มเซิร์ฟเวอร์
 pool.connect((err, client, release) => {
   if (err) {
     return console.error("Neon connecting failed:", err.stack);
   }
   console.log("Neon PostgreSQL is Connected");
-  release();
+  release(); // คืน client กลับเข้า pool ทันทีเมื่อเทสต์เสร็จ
 });
 
 module.exports = {
