@@ -38,6 +38,7 @@ app.use(
 app.use("/auth", authRoutes);
 // app.use("/user", userRoutes);
 app.use("/admin", adminRoutes);
+////
 // app.use('/master', masterRoutes);
 
 module.exports = app;
