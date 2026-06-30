@@ -4,7 +4,7 @@ const { swaggerUi, swaggerSpec } = require("./config/swagger");
 
 const authRoutes = require("./routes/authRoutes");
 // const userRoutes = require("./routes/userRoutes");
-// const adminRoutes = require("./routes/adminRoutes");
+const adminRoutes = require("./routes/adminRoutes");
 // const masterRoutes = require('./routes/masterRoutes');
 // const homeRoutes = require('./routes/homeRoutes')
 
@@ -37,7 +37,7 @@ app.use(
 // app.use('/', homeRoutes);
 app.use("/auth", authRoutes);
 // app.use("/user", userRoutes);
-// app.use("/admin", adminRoutes);
+app.use("/admin", adminRoutes);
 // app.use('/master', masterRoutes);
 
 module.exports = app;
