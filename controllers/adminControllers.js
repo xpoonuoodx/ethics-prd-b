@@ -1,9 +1,9 @@
-const db = require("../db"); 
+const db = require("../db");
+const bcrypt = require("bcryptjs");
 
-// --- GET ADMIN DASHBOARD ---
+// 1. ดึงข้อมูลหน้า Dashboard (ภาพรวม)
 exports.getDashboard = async (req, res) => {
   try {
-    // 1. ดึงข้อมูลสถิติภาพรวม 4 ใบ (Quick Stats)
     const statsResult = await db.query(`
       SELECT 
         (SELECT COUNT(*) FROM organizations) as total_organizations,
@@ -14,8 +14,6 @@ exports.getDashboard = async (req, res) => {
 
     const stats = statsResult.rows[0];
 
-    // 2. ดึงข้อมูลตารางรายชื่อหน่วยงาน พร้อมข้อมูล Regulator และสถิติย่อย
-    // ใช้ Subquery ในการดึงชื่อจริงจากตาราง profiles มาแสดงแทน
     const orgsResult = await db.query(`
       SELECT 
         o.id,
@@ -36,7 +34,6 @@ exports.getDashboard = async (req, res) => {
       ORDER BY o.created_at DESC
     `);
 
-    // 3. จัดฟอร์แมตข้อมูลให้อยู่ในรูปแบบที่ Frontend ของ React ต้องการ (อิงตาม Mock Data เดิม)
     const formattedOrganizations = orgsResult.rows.map((row) => ({
       id: row.org_code || `ORG-${String(row.id).padStart(3, "0")}`,
       name: row.org_name,
@@ -46,7 +43,6 @@ exports.getDashboard = async (req, res) => {
       status: row.status || "Active",
     }));
 
-    // 4. ส่งผลลัพธ์กลับไปให้ Frontend
     res.status(200).json({
       success: true,
       message: "ดึงข้อมูลแดชบอร์ดสำเร็จ",
@@ -65,6 +61,296 @@ exports.getDashboard = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "เกิดข้อผิดพลาดในการดึงข้อมูลฐานข้อมูล",
+    });
+  }
+};
+
+// 2. ดึงข้อมูลรายชื่อหน่วยงานทั้งหมด (สำหรับหน้าจัดการหน่วยงาน)
+exports.getOrganizations = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        o.id as db_id,
+        o.org_code,
+        o.org_name,
+        o.status,
+        COALESCE(
+          (SELECT p.first_name_th || ' ' || p.last_name_th 
+           FROM users u 
+           JOIN profiles p ON u.id = p.user_id 
+           WHERE u.organization_id = o.id AND u.role = 'regulator' 
+           LIMIT 1), 
+          'ยังไม่มีผู้ดูแล'
+        ) as regulator_name,
+        (SELECT COUNT(*) FROM projects p WHERE p.organization_id = o.id) as total_projects,
+        (SELECT COUNT(*) FROM users u WHERE u.organization_id = o.id) as total_users
+      FROM organizations o
+      ORDER BY o.created_at DESC
+    `);
+
+    // จัด Format ให้ตรงกับที่ React คาดหวัง
+    const formattedData = result.rows.map((row) => ({
+      id: row.org_code,
+      name: row.org_name,
+      regulatorName: row.regulator_name,
+      totalProjects: parseInt(row.total_projects) || 0,
+      totalUsers: parseInt(row.total_users) || 0,
+      status: row.status || "Active",
+    }));
+
+    res.json({ success: true, data: formattedData });
+  } catch (error) {
+    console.error("Get Organizations Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลหน่วยงาน",
+    });
+  }
+};
+
+// 3. เพิ่มหน่วยงานใหม่
+exports.addOrganization = async (req, res) => {
+  const { id, name, regulatorName, status } = req.body;
+
+  try {
+    // บันทึกเฉพาะโครงสร้างหน่วยงานไปก่อน ตามลำดับการทำงาน (สร้างบ้านก่อนเอาคนเข้าอยู่)
+    await db.query(
+      "INSERT INTO organizations (org_code, org_name, status) VALUES ($1, $2, $3)",
+      [id, name, status],
+    );
+
+    res.status(201).json({ success: true, message: "เพิ่มหน่วยงานสำเร็จ" });
+  } catch (error) {
+    console.error("Add Organization Error Database:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล",
+      error: error.message,
+    });
+  }
+};
+
+// 4. ดึงรายชื่อคนที่มีสิทธิ์เป็นผู้กำกับดูแล (เพื่อใส่ใน Dropdown)
+exports.getRegulators = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        u.id, 
+        p.first_name_th || ' ' || p.last_name_th AS name 
+      FROM users u 
+      INNER JOIN profiles p ON u.id = p.user_id 
+      WHERE u.role = 'regulator'
+    `);
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Regulators Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "ดึงข้อมูลผู้กำกับดูแลผิดพลาด",
+    });
+  }
+};
+
+// 5. ดึงข้อมูลรายชื่อผู้ใช้งานระบบทั้งหมด (สำหรับหน้าจัดการผู้ใช้งาน)
+exports.getUsers = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        u.id, 
+        u.username, 
+        u.role, 
+        p.first_name_th || ' ' || p.last_name_th AS name, 
+        o.org_name 
+      FROM users u 
+      LEFT JOIN profiles p ON u.id = p.user_id 
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      ORDER BY u.created_at DESC
+    `);
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Users Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "ดึงข้อมูลผู้ใช้งานผิดพลาด",
+    });
+  }
+};
+
+exports.addUser = async (req, res) => {
+  // รับข้อมูลเพิ่มเติม email และ id_card จากหน้าบ้าน
+  const { username, password, name, email, id_card, role, org_id } = req.body;
+
+  try {
+    // เริ่มต้น Transaction ผ่านตัว db.query ตรงๆ ตามที่ต้องการ
+    await db.query("BEGIN");
+
+    // ตรวจสอบความซ้ำซ้อนของชื่อผู้ใช้งานในระบบ
+    const checkUser = await db.query(
+      "SELECT id FROM users WHERE username = $1",
+      [username],
+    );
+
+    if (checkUser.rows.length > 0) {
+      await db.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ success: false, message: "ชื่อผู้ใช้งานนี้ถูกใช้ไปแล้ว" });
+    }
+
+    // เข้ารหัสผ่านเพื่อความปลอดภัย
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // ตรวจสอบและจัดการชนิดข้อมูลของ org_id ป้องกันข้อผิดพลาด Data Type Mismatch (Error 500)
+    let finalOrgId = null;
+    if (org_id && org_id !== "") {
+      // หากค่าที่ส่งมาเป็นข้อความ String (เช่น ORG-001) ให้แปลงหา ID จริงที่เป็นตัวเลขก่อน
+      if (isNaN(org_id)) {
+        const getOrg = await db.query(
+          "SELECT id FROM organizations WHERE org_code = $1",
+          [org_id],
+        );
+        if (getOrg.rows.length > 0) {
+          finalOrgId = getOrg.rows[0].id;
+        }
+      } else {
+        // หากส่งมาเป็นค่าตัวเลขตัวตรงอยู่แล้ว ให้แปลงเป็น Integer ทันที
+        finalOrgId = parseInt(org_id);
+      }
+    }
+
+    // 1. สั่งบันทึกข้อมูลหลักลงในตาราง users พร้อมรับค่า id ล่าสุดกลับมาใช้งาน
+    const insertUser = await db.query(
+      `
+      INSERT INTO users (username, password, role, organization_id) 
+      VALUES ($1, $2, $3, $4) RETURNING id
+    `,
+      [username, hashedPassword, role, finalOrgId],
+    );
+
+    const newUserId = insertUser.rows[0].id;
+
+    // แยกชื่อจริงและนามสกุลออกจากกันเพื่อนำไปจัดเก็บลงตาราง profiles
+    const nameParts = name.trim().split(" ");
+    const firstName = nameParts[0] || "";
+    const lastName = nameParts.slice(1).join(" ") || "";
+
+    // 2. สั่งบันทึกข้อมูลส่วนบุคคลลงตาราง profiles พร้อมผูกข้อมูล email และ id_card ที่ส่งมาจากหน้าบ้าน
+    await db.query(
+      `
+      INSERT INTO profiles (user_id, first_name_th, last_name_th, email, id_card, is_verified) 
+      VALUES ($1, $2, $3, $4, $5, true)
+    `,
+      [newUserId, firstName, lastName, email, id_card],
+    );
+
+    // ยืนยันการบันทึกข้อมูลทั้งหมดลงฐานข้อมูลระบบ
+    await db.query("COMMIT");
+    res
+      .status(201)
+      .json({ success: true, message: "เพิ่มบัญชีผู้ใช้งานสำเร็จ" });
+  } catch (error) {
+    // ในกรณีที่เกิดข้อผิดพลาดใดๆ ขึ้นระหว่างทำงาน ให้ทำการคืนค่าระบบเดิม (Rollback) ทันที
+    await db.query("ROLLBACK");
+    console.error("Add User Error Backend:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการบันทึกบัญชีลงฐานข้อมูล",
+    });
+  }
+};
+
+// 7. ดึงข้อมูลรายละเอียดหน่วยงานและรายชื่อบุคลากรภายในหน่วยงาน (ยกเว้น admin)
+exports.viewOrganization = async (req, res) => {
+  // รับค่า id จาก URL (เช่น ORG-001 หรือ ID ตัวเลข)
+  const { id } = req.params;
+
+  try {
+    // 1. ดึงข้อมูลภาพรวมของหน่วยงาน (เหมือนกับการดึงสถิติหน้า Dashboard)
+    const orgResult = await db.query(
+      `
+      SELECT 
+        o.id as db_id,
+        o.org_code,
+        o.org_name,
+        o.status,
+        COALESCE(
+          (SELECT p.first_name_th || ' ' || p.last_name_th 
+           FROM users u 
+           JOIN profiles p ON u.id = p.user_id 
+           WHERE u.organization_id = o.id AND u.role = 'regulator' 
+           LIMIT 1), 
+          'ยังไม่มีผู้ดูแล'
+        ) as regulator_name,
+        (SELECT COUNT(*) FROM projects p WHERE p.organization_id = o.id) as total_projects,
+        (SELECT COUNT(*) FROM users u WHERE u.organization_id = o.id) as total_users
+      FROM organizations o
+      WHERE o.org_code = $1 OR o.id::text = $1
+    `,
+      [id],
+    );
+
+    // ถ้าไม่พบหน่วยงาน ส่ง 404 กลับไป
+    if (orgResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบข้อมูลหน่วยงานนี้ในระบบ",
+      });
+    }
+
+    const orgData = orgResult.rows[0];
+
+    // 2. ดึงข้อมูลรายชื่อผู้ใช้งานเฉพาะที่สังกัดหน่วยงานนี้ และยกเว้น role 'admin'
+    const usersResult = await db.query(
+      `
+      SELECT 
+        u.id, 
+        u.username, 
+        u.role, 
+        p.first_name_th || ' ' || p.last_name_th AS name,
+        p.email
+      FROM users u 
+      INNER JOIN profiles p ON u.id = p.user_id 
+      WHERE u.organization_id = $1 AND u.role != 'admin'
+      ORDER BY u.created_at DESC
+    `,
+      [orgData.db_id],
+    );
+
+    const projectsResult = await db.query(
+      `
+      SELECT id, project_name, status, created_at
+      FROM projects 
+      WHERE organization_id = $1
+      ORDER BY created_at DESC
+    `,
+      [orgData.db_id],
+    );
+
+    // 3. จัดรูปแบบ (Format) ข้อมูลเพื่อส่งกลับไปให้หน้า Frontend ใช้งานได้ทันที
+    res.json({
+      success: true,
+      data: {
+        organization: {
+          id:
+            orgData.org_code || `ORG-${String(orgData.db_id).padStart(3, "0")}`,
+          name: orgData.org_name,
+          regulatorName: orgData.regulator_name,
+          totalProjects: parseInt(orgData.total_projects) || 0,
+          totalUsers: parseInt(orgData.total_users) || 0,
+          status: orgData.status || "Active",
+          projects: projectsResult.rows,
+        },
+        users: usersResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("View Organization Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลรายละเอียดหน่วยงาน",
     });
   }
 };
