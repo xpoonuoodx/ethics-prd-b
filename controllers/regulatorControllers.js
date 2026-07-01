@@ -1,20 +1,12 @@
 const db = require("../db");
 const bcrypt = require("bcryptjs");
 
+// 1. ดึงข้อมูล Dashboard
 exports.getDashboard = async (req, res) => {
   try {
-    // สมมติว่า middleware verifyToken ได้แนบข้อมูล user มาใน req.user
-    // และมี account_id หรือ id ของผู้ใช้งานอยู่
     const userId = req.user.account_id || req.user.id;
-
-    // 1. หา organization_id และชื่อหน่วยงาน (org_name) ของ Regulator คนนี้
     const userQuery = await db.query(
-      `
-      SELECT u.organization_id, o.org_name 
-      FROM users u
-      LEFT JOIN organizations o ON u.organization_id = o.id
-      WHERE u.id = $1
-      `,
+      "SELECT u.organization_id, o.org_name FROM users u LEFT JOIN organizations o ON u.organization_id = o.id WHERE u.id = $1",
       [userId],
     );
 
@@ -25,9 +17,8 @@ exports.getDashboard = async (req, res) => {
     }
 
     const orgId = userQuery.rows[0].organization_id;
-    const orgName = userQuery.rows[0].org_name; // ได้ชื่อหน่วยงานมาแล้ว
+    const orgName = userQuery.rows[0].org_name;
 
-    // 2. ดึงสถิติ Quick Stats
     const totalProjectsRes = await db.query(
       "SELECT COUNT(*) FROM projects WHERE organization_id = $1",
       [orgId],
@@ -40,79 +31,45 @@ exports.getDashboard = async (req, res) => {
       "SELECT COUNT(*) FROM projects WHERE organization_id = $1 AND status = 'Pending'",
       [orgId],
     );
-    // นับโครงการที่เสร็จสิ้นหรือดำเนินการแล้ว
     const activeProjectsRes = await db.query(
       "SELECT COUNT(*) FROM projects WHERE organization_id = $1 AND status != 'Pending'",
       [orgId],
     );
 
-    // 3. ดึงข้อมูลสำหรับกราฟ (แยกจำนวนโครงการตามสถานะ)
     const chartRes = await db.query(
-      `
-      SELECT status as name, COUNT(*) as projects 
-      FROM projects 
-      WHERE organization_id = $1 
-      GROUP BY status
-    `,
+      `SELECT status as name, COUNT(*) as projects FROM projects WHERE organization_id = $1 GROUP BY status`,
       [orgId],
     );
-
-    // จัด Format สีให้กราฟตามสถานะ
     const chartData = chartRes.rows.map((row) => {
-      let color = "#10b981"; // Default สีเขียว
-      if (row.name === "Pending") color = "#f59e0b"; // สีส้ม
+      let color = "#10b981";
+      if (row.name === "Pending") color = "#f59e0b";
       if (row.name === "High Risk" || row.name === "Rejected")
-        color = "#ef4444"; // สีแดง
-      return {
-        name: row.name,
-        projects: parseInt(row.projects),
-        color,
-      };
+        color = "#ef4444";
+      return { name: row.name, projects: parseInt(row.projects), color };
     });
 
-    // 4. ดึงรายชื่อบุคลากรล่าสุดในหน่วยงาน (จำกัด 5 คน)
     const usersRes = await db.query(
       `
-      SELECT 
-        u.id, 
-        u.username, 
-        u.role, 
-        p.first_name_th || ' ' || p.last_name_th AS name, 
-        u.created_at
-      FROM users u
-      LEFT JOIN profiles p ON u.id = p.user_id
-      WHERE u.organization_id = $1 AND u.role = 'user'
-      ORDER BY u.created_at DESC
-      LIMIT 5
+      SELECT u.id, u.username, u.role, p.first_name_th || ' ' || p.last_name_th AS name, u.created_at
+      FROM users u LEFT JOIN profiles p ON u.id = p.user_id
+      WHERE u.organization_id = $1 AND u.role = 'user' ORDER BY u.created_at DESC LIMIT 5
     `,
       [orgId],
     );
 
-    // 5. ดึงรายชื่อโครงการล่าสุดในหน่วยงาน (จำกัด 5 โครงการ)
     const projectsRes = await db.query(
       `
-      SELECT 
-        p.id, 
-        p.project_name, 
-        p.status, 
-        p.created_at, 
-        p.progress,
-        pr.first_name_th || ' ' || pr.last_name_th AS manager
-      FROM projects p
-      LEFT JOIN users u ON p.created_by = u.id
-      LEFT JOIN profiles pr ON u.id = pr.user_id
-      WHERE p.organization_id = $1
-      ORDER BY p.created_at DESC
-      LIMIT 5
+      SELECT p.id, p.project_name, p.status, p.created_at, p.progress, pr.first_name_th || ' ' || pr.last_name_th AS manager
+      FROM projects p LEFT JOIN users u ON p.created_by = u.id LEFT JOIN profiles pr ON u.id = pr.user_id
+      WHERE p.organization_id = $1 ORDER BY p.created_at DESC LIMIT 5
     `,
       [orgId],
     );
 
-    // ส่งข้อมูลกลับไปให้ Frontend พร้อมเพิ่ม orgName
     res.json({
       success: true,
       data: {
-        orgName: orgName, // ส่งชื่อหน่วยงานกลับไปด้วย
+        orgName: orgName,
         stats: {
           totalProjects: parseInt(totalProjectsRes.rows[0].count) || 0,
           totalUsers: parseInt(totalUsersRes.rows[0].count) || 0,
@@ -132,6 +89,7 @@ exports.getDashboard = async (req, res) => {
   }
 };
 
+// 2. ดึงรายชื่อบุคลากรในหน่วยงาน
 exports.getUsers = async (req, res) => {
   try {
     const userId = req.user.account_id || req.user.id;
@@ -141,12 +99,14 @@ exports.getUsers = async (req, res) => {
     );
     const orgId = orgQuery.rows[0].organization_id;
 
+    // เพิ่ม u.user_type เข้ามาในการดึงข้อมูล
     const result = await db.query(
       `
       SELECT 
         u.id, 
         u.username, 
-        u.role, 
+        u.role,
+        u.user_type, 
         'Active' AS status,
         p.first_name_th || ' ' || p.last_name_th AS name, 
         p.email,
@@ -168,10 +128,10 @@ exports.getUsers = async (req, res) => {
   }
 };
 
-// 3. เพิ่มบุคลากรใหม่ (เพิ่มการรองรับ id_card)
+// 3. เพิ่มบุคลากรใหม่ (รองรับ user_type)
 exports.addUser = async (req, res) => {
-  // รับค่า id_card เพิ่มเติมจาก req.body
-  const { username, password, name, email, id_card } = req.body;
+  // รับค่า user_type เพิ่มเติม
+  const { username, password, name, email, id_card, user_type } = req.body;
 
   try {
     const userId = req.user.account_id || req.user.id;
@@ -195,7 +155,6 @@ exports.addUser = async (req, res) => {
         .json({ success: false, message: "ชื่อผู้ใช้งานนี้ถูกใช้ไปแล้ว" });
     }
 
-    // เช็คเลขบัตรประชาชนซ้ำในระบบ (ป้องกัน Error Database)
     if (id_card) {
       const checkIdCard = await db.query(
         "SELECT id FROM profiles WHERE id_card = $1",
@@ -203,19 +162,21 @@ exports.addUser = async (req, res) => {
       );
       if (checkIdCard.rows.length > 0) {
         await db.query("ROLLBACK");
-        return res.status(400).json({
-          success: false,
-          message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
+          });
       }
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // บันทึกตาราง users
+    // บันทึกตาราง users โดยใส่ user_type เข้าไปด้วย
     const insertUser = await db.query(
-      `INSERT INTO users (username, password, role, organization_id) VALUES ($1, $2, 'user', $3) RETURNING id`,
-      [username, hashedPassword, orgId],
+      `INSERT INTO users (username, password, role, organization_id, user_type) VALUES ($1, $2, 'user', $3, $4) RETURNING id`,
+      [username, hashedPassword, orgId, user_type],
     );
 
     const newUserId = insertUser.rows[0].id;
@@ -223,7 +184,6 @@ exports.addUser = async (req, res) => {
     const firstName = nameParts[0] || "";
     const lastName = nameParts.slice(1).join(" ") || "";
 
-    // บันทึกตาราง profiles โดยเพิ่ม id_card เข้าไป
     await db.query(
       `INSERT INTO profiles (user_id, first_name_th, last_name_th, email, id_card, is_verified) VALUES ($1, $2, $3, $4, $5, true)`,
       [newUserId, firstName, lastName, email, id_card],
@@ -276,6 +236,11 @@ exports.deleteUser = async (req, res) => {
   }
 };
 
+// ==========================================
+// ส่วนของการจัดการโครงการ (Projects)
+// ==========================================
+
+// 5. ดึงข้อมูลโครงการทั้งหมดในหน่วยงาน
 exports.getProjects = async (req, res) => {
   try {
     const userId = req.user.account_id || req.user.id;
@@ -326,7 +291,6 @@ exports.addProject = async (req, res) => {
     );
     const orgId = orgQuery.rows[0].organization_id;
 
-    // เช็คว่า project_code ซ้ำหรือไม่
     const checkCode = await db.query(
       "SELECT id FROM projects WHERE project_code = $1",
       [project_code],
@@ -363,7 +327,6 @@ exports.deleteProject = async (req, res) => {
     );
     const orgId = orgQuery.rows[0].organization_id;
 
-    // เช็คสิทธิ์ว่าโครงการนี้อยู่ในหน่วยงานตัวเองหรือไม่
     const checkProject = await db.query(
       "SELECT organization_id FROM projects WHERE id = $1",
       [id],
@@ -398,7 +361,6 @@ exports.assignUserToProject = async (req, res) => {
     );
     const orgId = orgQuery.rows[0].organization_id;
 
-    // ตรวจสอบว่าโปรเจคอยู่ในหน่วยงานเราจริงไหม
     const checkProject = await db.query(
       "SELECT id FROM projects WHERE id = $1 AND organization_id = $2",
       [project_id, orgId],
@@ -409,19 +371,19 @@ exports.assignUserToProject = async (req, res) => {
         .json({ success: false, message: "ไม่มีสิทธิ์จัดการโครงการนี้" });
     }
 
-    // ตรวจสอบว่าเคยเพิ่มคนนี้ไปแล้วหรือยัง
     const checkExist = await db.query(
       "SELECT * FROM project_members WHERE project_id = $1 AND user_id = $2",
       [project_id, user_id],
     );
     if (checkExist.rows.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: "บุคลากรท่านนี้อยู่ในโครงการอยู่แล้ว",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "บุคลากรท่านนี้อยู่ในโครงการอยู่แล้ว",
+        });
     }
 
-    // บันทึกลงตาราง project_members
     await db.query(
       "INSERT INTO project_members (project_id, user_id) VALUES ($1, $2)",
       [project_id, user_id],
@@ -436,6 +398,7 @@ exports.assignUserToProject = async (req, res) => {
   }
 };
 
+// 9. ดึงข้อมูลรายละเอียดโครงการและบุคลากรภายในโครงการ
 exports.viewProject = async (req, res) => {
   const { id } = req.params;
 
@@ -447,7 +410,6 @@ exports.viewProject = async (req, res) => {
     );
     const orgId = orgQuery.rows[0].organization_id;
 
-    // 1. ดึงข้อมูลรายละเอียดโครงการ (เช็คด้วยว่าอยู่ในหน่วยงานตัวเองไหม)
     const projectResult = await db.query(
       `SELECT id, project_code, project_name, progress, created_at 
        FROM projects 
@@ -466,7 +428,6 @@ exports.viewProject = async (req, res) => {
 
     const projectData = projectResult.rows[0];
 
-    // 2. ดึงรายชื่อบุคลากร (Members) ที่ถูกเพิ่มเข้ามาในโครงการนี้
     const membersResult = await db.query(
       `SELECT 
          u.id, 
@@ -476,8 +437,7 @@ exports.viewProject = async (req, res) => {
        FROM project_members pm
        JOIN users u ON pm.user_id = u.id
        LEFT JOIN profiles p ON u.id = p.user_id
-       WHERE pm.project_id = $1
-       ORDER BY pm.assigned_at DESC`, // ถ้าไม่มี assigned_at ใน DB ให้เอา ORDER BY ออกได้ครับ
+       WHERE pm.project_id = $1`,
       [id],
     );
 

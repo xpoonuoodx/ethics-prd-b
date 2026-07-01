@@ -262,13 +262,11 @@ exports.addUser = async (req, res) => {
   }
 };
 
-// 7. ดึงข้อมูลรายละเอียดหน่วยงานและรายชื่อบุคลากรภายในหน่วยงาน (ยกเว้น admin)
 exports.viewOrganization = async (req, res) => {
-  // รับค่า id จาก URL (เช่น ORG-001 หรือ ID ตัวเลข)
   const { id } = req.params;
 
   try {
-    // 1. ดึงข้อมูลภาพรวมของหน่วยงาน (เหมือนกับการดึงสถิติหน้า Dashboard)
+    // 1. ดึงข้อมูลภาพรวมของหน่วยงาน
     const orgResult = await db.query(
       `
       SELECT 
@@ -292,7 +290,6 @@ exports.viewOrganization = async (req, res) => {
       [id],
     );
 
-    // ถ้าไม่พบหน่วยงาน ส่ง 404 กลับไป
     if (orgResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -302,7 +299,7 @@ exports.viewOrganization = async (req, res) => {
 
     const orgData = orgResult.rows[0];
 
-    // 2. ดึงข้อมูลรายชื่อผู้ใช้งานเฉพาะที่สังกัดหน่วยงานนี้ และยกเว้น role 'admin'
+    // 2. ดึงข้อมูลรายชื่อผู้ใช้งานทั้งหมดในหน่วยงานนี้ (ยกเว้น admin)
     const usersResult = await db.query(
       `
       SELECT 
@@ -319,17 +316,36 @@ exports.viewOrganization = async (req, res) => {
       [orgData.db_id],
     );
 
+    // 3. ดึงรายการโครงการ พร้อมนับจำนวนคน และรวบรวมรายชื่อคนที่อยู่ในโครงการนี้ (Join ตาราง project_members)
     const projectsResult = await db.query(
       `
-      SELECT id, project_name, status, created_at
-      FROM projects 
-      WHERE organization_id = $1
-      ORDER BY created_at DESC
+      SELECT 
+        p.id, 
+        p.project_name, 
+        p.status, 
+        p.created_at,
+        COUNT(pm.user_id) as member_count,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', u.id,
+              'name', pr.first_name_th || ' ' || pr.last_name_th,
+              'username', u.username
+            )
+          ) FILTER (WHERE u.id IS NOT NULL), '[]'::json
+        ) as members
+      FROM projects p
+      LEFT JOIN project_members pm ON p.id = pm.project_id
+      LEFT JOIN users u ON pm.user_id = u.id
+      LEFT JOIN profiles pr ON u.id = pr.user_id
+      WHERE p.organization_id = $1
+      GROUP BY p.id
+      ORDER BY p.created_at DESC
     `,
       [orgData.db_id],
     );
 
-    // 3. จัดรูปแบบ (Format) ข้อมูลเพื่อส่งกลับไปให้หน้า Frontend ใช้งานได้ทันที
+    // 4. ส่งกลับข้อมูล (แยก projects ออกมาไว้ระดับเดียวกับ users ตามที่ Frontend ใช้งาน)
     res.json({
       success: true,
       data: {
@@ -341,9 +357,9 @@ exports.viewOrganization = async (req, res) => {
           totalProjects: parseInt(orgData.total_projects) || 0,
           totalUsers: parseInt(orgData.total_users) || 0,
           status: orgData.status || "Active",
-          projects: projectsResult.rows,
         },
         users: usersResult.rows,
+        projects: projectsResult.rows, // ส่ง Array โครงการไปให้หน้าบ้าน
       },
     });
   } catch (error) {
