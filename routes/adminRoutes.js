@@ -18,4 +18,65 @@ router.get(
   adminControllers.viewOrganization,
 );
 
+router.get("/get-principles", verifyToken, adminControllers.getPrinciples);
+router.post("/add-principle", verifyToken, adminControllers.addPrinciple);
+router.put(
+  "/update-principle/:id",
+  verifyToken,
+  adminControllers.updatePrinciple,
+);
+router.delete(
+  "/delete-principle/:id",
+  verifyToken,
+  adminControllers.deletePrinciple,
+);
+
+router.get(
+  "/get-maturity-levels",
+  verifyToken,
+  adminControllers.getMaturityLevels,
+);
+router.put(
+  "/update-maturity-level/:id",
+  verifyToken,
+  adminControllers.updateMaturityLevel,
+);
+
+router.get("/get-components", verifyToken, adminControllers.getComponents);
+router.post("/add-component", verifyToken, adminControllers.addComponent);
+router.put(
+  "/update-component/:id",
+  verifyToken,
+  adminControllers.updateComponent,
+);
+router.delete(
+  "/delete-component/:id",
+  verifyToken,
+  adminControllers.deleteComponent,
+);
+
+router.get(
+  "/get-mapping-matrix",
+  verifyToken,
+  adminControllers.getMappingMatrix,
+);
+router.post(
+  "/save-mapping-matrix",
+  verifyToken,
+  adminControllers.saveMappingMatrix,
+);
+
+router.get("/get-guideline", verifyToken, adminControllers.getGuideline);
+router.post("/save-guideline", verifyToken, adminControllers.saveGuideline);
+router.get(
+  "/get-all-guidelines",
+  verifyToken,
+  adminControllers.getAllGuidelines,
+);
+router.delete(
+  "/delete-guideline/:id",
+  verifyToken,
+  adminControllers.deleteGuideline,
+);
+
 module.exports = router;

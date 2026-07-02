@@ -370,3 +370,513 @@ exports.viewOrganization = async (req, res) => {
     });
   }
 };
+
+// ==========================================
+// ส่วนของการจัดการหลักการ (Principles)
+// ==========================================
+
+// 1. ดึงข้อมูล Principles ทั้งหมด
+exports.getPrinciples = async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT id, name, description FROM principles ORDER BY id ASC",
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Principles Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงข้อมูลหลักการ" });
+  }
+};
+
+// 2. เพิ่ม Principle ใหม่
+exports.addPrinciple = async (req, res) => {
+  const { id, name, description } = req.body;
+
+  if (!id || !name) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณากรอกรหัสและชื่อหลักการให้ครบถ้วน",
+    });
+  }
+
+  try {
+    // เช็คว่ารหัสซ้ำหรือไม่ (เพราะ id เป็น VARCHAR ที่แอดมินกรอกเอง)
+    const checkExist = await db.query(
+      "SELECT id FROM principles WHERE id = $1",
+      [id],
+    );
+    if (checkExist.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "รหัสหลักการนี้มีอยู่ในระบบแล้ว กรุณาใช้รหัสอื่น",
+      });
+    }
+
+    await db.query(
+      "INSERT INTO principles (id, name, description) VALUES ($1, $2, $3)",
+      [id, name, description],
+    );
+
+    res.status(201).json({ success: true, message: "เพิ่มหลักการสำเร็จ" });
+  } catch (error) {
+    console.error("Add Principle Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการเพิ่มข้อมูล" });
+  }
+};
+
+// 3. แก้ไข Principle
+exports.updatePrinciple = async (req, res) => {
+  const { id } = req.params; // id เดิมที่ส่งมาจาก URL
+  const { name, description } = req.body;
+
+  if (!name) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณากรอกชื่อหลักการ" });
+  }
+
+  try {
+    const updateQuery = await db.query(
+      "UPDATE principles SET name = $1, description = $2 WHERE id = $3 RETURNING id",
+      [name, description, id],
+    );
+
+    if (updateQuery.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลหลักการที่ต้องการแก้ไข" });
+    }
+
+    res.json({ success: true, message: "อัปเดตหลักการสำเร็จ" });
+  } catch (error) {
+    console.error("Update Principle Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการอัปเดตข้อมูล" });
+  }
+};
+
+// 4. ลบ Principle
+exports.deletePrinciple = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const deleteQuery = await db.query(
+      "DELETE FROM principles WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (deleteQuery.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลที่ต้องการลบ" });
+    }
+
+    res.json({ success: true, message: "ลบหลักการสำเร็จ" });
+  } catch (error) {
+    console.error("Delete Principle Error:", error);
+    // ดัก Error กรณีที่หลักการนี้ถูกนำไปอ้างอิงในตารางอื่นแล้ว (Foreign Key Constraint)
+    if (error.code === "23503") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "ไม่สามารถลบได้ เนื่องจากหลักการนี้ถูกนำไปใช้งานในเกณฑ์การประเมินแล้ว",
+      });
+    }
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
+exports.getMaturityLevels = async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT level_id, level_name, description, is_active FROM maturity_levels ORDER BY level_id ASC",
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Maturity Levels Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลระดับความพร้อม",
+    });
+  }
+};
+
+// 2. แก้ไข นิยาม หรือสถานะเปิดใช้งานของ Level
+exports.updateMaturityLevel = async (req, res) => {
+  const { id } = req.params; // รับค่า level_id มาทาง URL params
+  const { level_name, description, is_active } = req.body;
+
+  if (!level_name) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณาระบุชื่อระดับความพร้อม" });
+  }
+
+  try {
+    const updateQuery = await db.query(
+      `UPDATE maturity_levels 
+       SET level_name = $1, description = $2, is_active = $3 
+       WHERE level_id = $4 RETURNING level_id`,
+      [level_name, description, is_active, id],
+    );
+
+    if (updateQuery.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบข้อมูลระดับความพร้อมที่ต้องการแก้ไข",
+      });
+    }
+
+    res.json({ success: true, message: "อัปเดตเกณฑ์ระดับความพร้อมสำเร็จ" });
+  } catch (error) {
+    console.error("Update Maturity Level Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
+exports.getComponents = async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT id, role, title, max_maturity_level FROM components ORDER BY id ASC",
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Components Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลหัวข้อการประเมิน",
+    });
+  }
+};
+
+// 2. เพิ่ม Component ใหม่
+exports.addComponent = async (req, res) => {
+  const { id, role, title, max_maturity_level } = req.body;
+
+  if (!id || !role || !title || max_maturity_level === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณากรอกข้อมูลให้ครบถ้วนทุกช่อง" });
+  }
+
+  try {
+    // ตรวจสอบรหัส Component ซ้ำ (เนื่องจาก ID แอดมินเป็นคนระบุเอง เช่น ERM01)
+    const checkExist = await db.query(
+      "SELECT id FROM components WHERE id = $1",
+      [id],
+    );
+    if (checkExist.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "รหัสหัวข้อการประเมินนี้มีอยู่ในระบบแล้ว",
+      });
+    }
+
+    await db.query(
+      "INSERT INTO components (id, role, title, max_maturity_level) VALUES ($1, $2, $3, $4)",
+      [id, role, title, parseInt(max_maturity_level)],
+    );
+
+    res
+      .status(201)
+      .json({ success: true, message: "เพิ่มหัวข้อการประเมินสำเร็จ" });
+  } catch (error) {
+    console.error("Add Component Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
+// 3. แก้ไข Component
+exports.updateComponent = async (req, res) => {
+  const { id } = req.params;
+  const { role, title, max_maturity_level } = req.body;
+
+  if (!role || !title || max_maturity_level === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณากรอกข้อมูลให้ครบถ้วน" });
+  }
+
+  try {
+    const updateQuery = await db.query(
+      `UPDATE components 
+       SET role = $1, title = $2, max_maturity_level = $3 
+       WHERE id = $4 RETURNING id`,
+      [role, title, parseInt(max_maturity_level), id],
+    );
+
+    if (updateQuery.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลที่ต้องการแก้ไข" });
+    }
+
+    res.json({ success: true, message: "อัปเดตหัวข้อการประเมินสำเร็จ" });
+  } catch (error) {
+    console.error("Update Component Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการอัปเดตข้อมูล" });
+  }
+};
+
+// 4. ลบ Component
+exports.deleteComponent = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const deleteQuery = await db.query(
+      "DELETE FROM components WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (deleteQuery.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลที่ต้องการลบ" });
+    }
+
+    res.json({ success: true, message: "ลบหัวข้อการประเมินสำเร็จ" });
+  } catch (error) {
+    console.error("Delete Component Error:", error);
+    // ดักจับ Error กรณีถูกผูกอยู่กับตารางคำถามหรือตารางความสัมพันธ์ Mapping Matrix
+    if (error.code === "23503") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "ไม่สามารถลบได้ เนื่องจากหัวข้อนี้ถูกนำไปตั้งค่าความสัมพันธ์เกณฑ์จริยธรรม (Matrix) หรือคลังคำถามแล้ว",
+      });
+    }
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
+exports.getMappingMatrix = async (req, res) => {
+  const { role } = req.query; // รับ parameter role (เช่น regulator, policy) เพื่อกรองข้อมูล
+
+  try {
+    // 1. ดึง Principles ทั้งหมด มาเป็นหัวตาราง (แกน X)
+    const principlesQuery = await db.query(
+      "SELECT id, name FROM principles ORDER BY id ASC",
+    );
+    const principles = principlesQuery.rows;
+
+    // 2. ดึง Components (กรองตาม role) มาเป็นแถว (แกน Y)
+    let componentsQuery;
+    let queryParams = [];
+
+    if (role && role !== "all") {
+      componentsQuery = await db.query(
+        "SELECT id, title, max_maturity_level FROM components WHERE role = $1 ORDER BY id ASC",
+        [role],
+      );
+    } else {
+      componentsQuery = await db.query(
+        "SELECT id, role, title, max_maturity_level FROM components ORDER BY role ASC, id ASC",
+      );
+    }
+    const components = componentsQuery.rows;
+
+    // 3. ดึงความสัมพันธ์ทั้งหมดที่เคยจับคู่ไว้ (ที่เคยติ๊กถูกไว้)
+    const mappingQuery = await db.query(
+      "SELECT component_id, principle_id FROM component_principles",
+    );
+    const mappings = mappingQuery.rows;
+
+    // 4. ส่งข้อมูลกลับไปให้หน้าบ้านประกอบร่าง
+    res.json({
+      success: true,
+      data: {
+        principles,
+        components,
+        mappings, // ส่งเป็น Array [ {component_id: 'ERM01', principle_id: 'P01'}, ... ]
+      },
+    });
+  } catch (error) {
+    console.error("Get Mapping Matrix Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลผังการประเมิน",
+    });
+  }
+};
+
+// 2. บันทึกการจับคู่ (เมื่อแอดมินกดปุ่ม Save)
+exports.saveMappingMatrix = async (req, res) => {
+  // รับข้อมูลการติ๊กถูกทั้งหมดของ Role นั้นๆ มาเป็น Array
+  // รูปแบบ: { role: 'regulator', mappings: [ {component_id: 'ERM01', principle_id: 'P01'}, ... ] }
+  const { role, mappings } = req.body;
+
+  if (!role || !mappings || !Array.isArray(mappings)) {
+    return res
+      .status(400)
+      .json({ success: false, message: "ข้อมูลที่ส่งมาไม่ถูกต้อง" });
+  }
+
+  try {
+    await db.query("BEGIN"); // เริ่ม Transaction เพื่อความปลอดภัยของฐานข้อมูล
+
+    // 1. ลบความสัมพันธ์ "เดิม" ของ Components ในกลุ่ม Role นี้ออกให้หมดก่อน
+    // (เทคนิคนี้ง่ายกว่าการมานั่งหาว่าแอดมินติ๊กเอาอันไหนเข้า อันไหนออก)
+    await db.query(
+      `DELETE FROM component_principles 
+       WHERE component_id IN (SELECT id FROM components WHERE role = $1)`,
+      [role],
+    );
+
+    // 2. Insert ความสัมพันธ์ "ใหม่" ทั้งหมดที่แอดมินติ๊กเข้ามา
+    if (mappings.length > 0) {
+      // สร้าง SQL Command แบบ Bulk Insert เช่น INSERT INTO (...) VALUES ($1, $2), ($3, $4)
+      const values = [];
+      const queryParams = [];
+      let paramIndex = 1;
+
+      mappings.forEach((map) => {
+        values.push(`($${paramIndex}, $${paramIndex + 1})`);
+        queryParams.push(map.component_id, map.principle_id);
+        paramIndex += 2;
+      });
+
+      const insertQuery = `INSERT INTO component_principles (component_id, principle_id) VALUES ${values.join(", ")}`;
+      await db.query(insertQuery, queryParams);
+    }
+
+    await db.query("COMMIT"); // ยืนยันการบันทึก
+    res.json({ success: true, message: "บันทึกผังการประเมินสำเร็จ" });
+  } catch (error) {
+    await db.query("ROLLBACK"); // ถ้ายกเลิก หรือ Error ให้ย้อนกลับข้อมูลทั้งหมด
+    console.error("Save Mapping Matrix Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
+exports.getGuideline = async (req, res) => {
+  const { user_type, level_id } = req.query; // เปลี่ยนเป็น user_type
+
+  if (!user_type || level_id === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณาระบุ User Type และ Level" });
+  }
+
+  try {
+    const result = await db.query(
+      "SELECT * FROM evaluation_guidelines WHERE user_type = $1 AND level_id = $2",
+      [user_type, parseInt(level_id)],
+    );
+
+    // ถ้ายังไม่มีข้อมูล ส่งค่าว่างกลับไปให้ฟอร์มหน้าบ้าน
+    if (result.rows.length === 0) {
+      return res.json({ success: true, data: null });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("Get Guideline Error:", error);
+    res.status(500).json({ success: false, message: "ดึงข้อมูลผิดพลาด" });
+  }
+};
+
+// 2. บันทึกข้อมูล Guideline (Upsert - มีแล้วแก้, ไม่มีให้เพิ่ม)
+exports.saveGuideline = async (req, res) => {
+  const {
+    user_type,
+    level_id,
+    analysis,
+    strengths,
+    gaps,
+    risks,
+    recommendations,
+    roadmap,
+  } = req.body; // เปลี่ยนเป็น user_type
+
+  if (!user_type || level_id === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "ข้อมูลไม่ครบถ้วน" });
+  }
+
+  try {
+    const upsertQuery = `
+      INSERT INTO evaluation_guidelines (user_type, level_id, analysis, strengths, gaps, risks, recommendations, roadmap)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (user_type, level_id) 
+      DO UPDATE SET
+        analysis = EXCLUDED.analysis,
+        strengths = EXCLUDED.strengths,
+        gaps = EXCLUDED.gaps,
+        risks = EXCLUDED.risks,
+        recommendations = EXCLUDED.recommendations,
+        roadmap = EXCLUDED.roadmap
+      RETURNING id;
+    `;
+
+    await db.query(upsertQuery, [
+      user_type,
+      parseInt(level_id),
+      analysis,
+      strengths,
+      gaps,
+      risks,
+      recommendations,
+      roadmap,
+    ]);
+
+    res.json({ success: true, message: "บันทึกแนวทางการพัฒนาสำเร็จ" });
+  } catch (error) {
+    console.error("Save Guideline Error:", error);
+    res.status(500).json({ success: false, message: "บันทึกข้อมูลผิดพลาด" });
+  }
+};
+
+exports.getAllGuidelines = async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT * FROM evaluation_guidelines ORDER BY user_type ASC, level_id ASC",
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get All Guidelines Error:", error);
+    res.status(500).json({ success: false, message: "ดึงข้อมูลผิดพลาด" });
+  }
+};
+
+// 4. ลบข้อมูล Guideline
+exports.deleteGuideline = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const deleteQuery = await db.query(
+      "DELETE FROM evaluation_guidelines WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (deleteQuery.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลที่ต้องการลบ" });
+    }
+
+    res.json({ success: true, message: "ลบข้อมูลสำเร็จ" });
+  } catch (error) {
+    console.error("Delete Guideline Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
