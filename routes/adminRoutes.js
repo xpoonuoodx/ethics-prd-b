@@ -5,4 +5,8 @@ const router = express.Router();
 
 router.get("/dashboard", verifyToken, adminControllers.getDashboard);
 
+// Route สำหรับระบบคลาสรูม
+router.get("/classroom", verifyToken, adminControllers.getChapters);
+router.post("/classroom/add", verifyToken, adminControllers.createChapter);
+
 module.exports = router;

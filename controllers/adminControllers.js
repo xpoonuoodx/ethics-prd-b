@@ -68,3 +68,104 @@ exports.getDashboard = async (req, res) => {
     });
   }
 };
+
+// --- GET CHAPTERS (ดึงข้อมูลบทเรียนทั้งหมด) ---
+  exports.getChapters = async (req, res) => {
+    try {
+      const query = `
+      SELECT 
+        c.id, 
+        c.title, 
+        c.target_group AS "targetGroup", 
+        c.status,
+        COUNT(q.id) AS "questionCount"
+      FROM chapters c
+      LEFT JOIN questions q ON c.id = q.chapter_id
+      GROUP BY c.id
+      ORDER BY c.created_at DESC
+    `;
+      const result = await db.query(query);
+
+      const formattedChapters = result.rows.map((row) => ({
+        id: `CH-${row.id.toString().padStart(2, "0")}`,
+        rawId: row.id,
+        title: row.title,
+        targetRole: `กลุ่มที่ ${row.targetGroup}`,
+        status: row.status,
+        questionCount: parseInt(row.questionCount),
+      }));
+
+      res.status(200).json({
+        success: true,
+        message: "ดึงข้อมูลบทเรียนสำเร็จ",
+        data: { chapters: formattedChapters },
+      });
+    } catch (error) {
+      console.error("Get Chapters Error:", error);
+      res
+        .status(500)
+        .json({ success: false, message: "ไม่สามารถดึงข้อมูลบทเรียนได้" });
+    }
+  };
+
+  // --- CREATE CHAPTER (เพิ่มบทเรียนและข้อสอบใหม่) ---
+  exports.createChapter = async (req, res) => {
+    let client;
+    try {
+      // ใช้ getClient() สำหรับสร้าง Transaction ให้เซฟ 2 ตารางพร้อมกัน
+      client = await db.getClient();
+      await client.query("BEGIN");
+
+      const { title, targetRole, status, videoUrl, questions } = req.body;
+
+      // แปลงชื่อกลุ่มเป้าหมายเป็นตัวเลข
+      let targetGroup = 1;
+      if (targetRole === "Group 2") targetGroup = 2;
+      else if (targetRole === "Group 3") targetGroup = 3;
+
+      // 1. Insert ลงตาราง chapters
+      const insertChapterQuery = `
+      INSERT INTO chapters (title, target_group, video_url, status)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `;
+      const chapterResult = await client.query(insertChapterQuery, [
+        title,
+        targetGroup,
+        videoUrl,
+        status,
+      ]);
+      const newChapterId = chapterResult.rows[0].id;
+
+      // 2. Insert ข้อสอบลงตาราง questions
+      if (questions && questions.length > 0) {
+        const insertQuestionQuery = `
+        INSERT INTO questions (chapter_id, question_text, options, correct_answer)
+        VALUES ($1, $2, $3, $4)
+      `;
+        for (let q of questions) {
+          await client.query(insertQuestionQuery, [
+            newChapterId,
+            q.questionText,
+            JSON.stringify(q.options), // แปลง array เป็น JSONB
+            q.correctAnswer,
+          ]);
+        }
+      }
+
+      await client.query("COMMIT"); // ยืนยันการเซฟข้อมูลทั้งหมด
+      res.status(201).json({
+        success: true,
+        message: "บันทึกบทเรียนและข้อสอบเรียบร้อยแล้ว",
+        data: { chapterId: newChapterId },
+      });
+    } catch (error) {
+      if (client) await client.query("ROLLBACK"); // ถ้าพังให้ยกเลิกการเซฟทั้งหมด
+      console.error("Create Chapter Error:", error);
+      res
+        .status(500)
+        .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+    } finally {
+      if (client) client.release(); // คืนการเชื่อมต่อกลับสู่ pool
+    }
+  };
