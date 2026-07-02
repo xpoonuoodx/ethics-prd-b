@@ -29,6 +29,8 @@ pool.connect((err, client, release) => {
   release(); // คืน client กลับเข้า pool ทันทีเมื่อเทสต์เสร็จ
 });
 
+// เปลี่ยนบรรทัดล่างสุดของ db.js ให้เป็นแบบนี้ครับ
 module.exports = {
   query: (text, params) => pool.query(text, params),
+  getClient: () => pool.connect(), // 👈 เพิ่มบรรทัดนี้เข้ามาสำหรับทำ Transaction
 };

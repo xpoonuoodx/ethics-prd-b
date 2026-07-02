@@ -79,4 +79,16 @@ router.delete(
   adminControllers.deleteGuideline,
 );
 
+router.get("/classroom", verifyToken, adminControllers.getChapters);
+router.post("/classroom/add", verifyToken, adminControllers.createChapter);
+
+router.delete(
+  "/classroom/delete/:id",
+  verifyToken,
+  adminControllers.deleteChapter,
+);
+
+router.get("/classroom/:id", verifyToken, adminControllers.getChapterById);
+router.put("/classroom/edit/:id", verifyToken, adminControllers.updateChapter);
+
 module.exports = router;
