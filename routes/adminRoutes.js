@@ -91,4 +91,22 @@ router.delete(
 router.get("/classroom/:id", verifyToken, adminControllers.getChapterById);
 router.put("/classroom/edit/:id", verifyToken, adminControllers.updateChapter);
 
+router.get("/certificates", verifyToken, adminControllers.getCertificates);
+router.delete(
+  "/certificates/delete/:id",
+  verifyToken,
+  adminControllers.deleteCertificate,
+);
+
+router.get(
+  "/certificate-settings/:groupId",
+  verifyToken,
+  adminControllers.getCertificateSettings,
+);
+router.post(
+  "/certificate-settings",
+  verifyToken,
+  adminControllers.saveCertificateSettings,
+);
+
 module.exports = router;

@@ -881,7 +881,6 @@ exports.deleteGuideline = async (req, res) => {
   }
 };
 
-// --- GET CHAPTERS (ดึงข้อมูลบทเรียนทั้งหมด) ---
 exports.getChapters = async (req, res) => {
   try {
     const query = `
@@ -890,6 +889,7 @@ exports.getChapters = async (req, res) => {
         c.title, 
         c.target_group AS "targetGroup", 
         c.status,
+        c.passing_percentage AS "passingPercentage",
         COUNT(q.id) AS "questionCount"
       FROM chapters c
       LEFT JOIN questions q ON c.id = q.chapter_id
@@ -904,6 +904,7 @@ exports.getChapters = async (req, res) => {
       title: row.title,
       targetRole: `กลุ่มที่ ${row.targetGroup}`,
       status: row.status,
+      passingPercentage: row.passingPercentage,
       questionCount: parseInt(row.questionCount),
     }));
 
@@ -924,21 +925,27 @@ exports.getChapters = async (req, res) => {
 exports.createChapter = async (req, res) => {
   let client;
   try {
-    // ใช้ getClient() สำหรับสร้าง Transaction ให้เซฟ 2 ตารางพร้อมกัน
     client = await db.getClient();
     await client.query("BEGIN");
 
-    const { title, targetRole, status, videoUrl, questions } = req.body;
+    // เพิ่มการรับค่า passingPercentage จากหน้าบ้าน
+    const {
+      title,
+      targetRole,
+      status,
+      videoUrl,
+      questions,
+      passingPercentage,
+    } = req.body;
 
-    // แปลงชื่อกลุ่มเป้าหมายเป็นตัวเลข
     let targetGroup = 1;
     if (targetRole === "Group 2") targetGroup = 2;
     else if (targetRole === "Group 3") targetGroup = 3;
 
-    // 1. Insert ลงตาราง chapters
+    // บันทึกค่า passing_percentage ลงฐานข้อมูล (ถ้าไม่ส่งมาให้ใช้ค่า default 80)
     const insertChapterQuery = `
-      INSERT INTO chapters (title, target_group, video_url, status)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO chapters (title, target_group, video_url, status, passing_percentage)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING id
     `;
     const chapterResult = await client.query(insertChapterQuery, [
@@ -946,10 +953,10 @@ exports.createChapter = async (req, res) => {
       targetGroup,
       videoUrl,
       status,
+      passingPercentage ? parseInt(passingPercentage) : 80,
     ]);
     const newChapterId = chapterResult.rows[0].id;
 
-    // 2. Insert ข้อสอบลงตาราง questions
     if (questions && questions.length > 0) {
       const insertQuestionQuery = `
         INSERT INTO questions (chapter_id, question_text, options, correct_answer)
@@ -959,62 +966,34 @@ exports.createChapter = async (req, res) => {
         await client.query(insertQuestionQuery, [
           newChapterId,
           q.questionText,
-          JSON.stringify(q.options), // แปลง array เป็น JSONB
+          JSON.stringify(q.options),
           q.correctAnswer,
         ]);
       }
     }
 
-    await client.query("COMMIT"); // ยืนยันการเซฟข้อมูลทั้งหมด
+    await client.query("COMMIT");
     res.status(201).json({
       success: true,
       message: "บันทึกบทเรียนและข้อสอบเรียบร้อยแล้ว",
       data: { chapterId: newChapterId },
     });
   } catch (error) {
-    if (client) await client.query("ROLLBACK"); // ถ้าพังให้ยกเลิกการเซฟทั้งหมด
+    if (client) await client.query("ROLLBACK");
     console.error("Create Chapter Error:", error);
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
   } finally {
-    if (client) client.release(); // คืนการเชื่อมต่อกลับสู่ pool
+    if (client) client.release();
   }
 };
 
-// --- DELETE CHAPTER (ลบบทเรียน) ---
-exports.deleteChapter = async (req, res) => {
-  try {
-    const { id } = req.params; // รับค่า id ที่ส่งมากับ URL
-
-    // สั่งลบบทเรียน (ข้อสอบที่ผูกอยู่จะหายไปเองเพราะ ON DELETE CASCADE)
-    const deleteQuery = "DELETE FROM chapters WHERE id = $1 RETURNING id";
-    const result = await db.query(deleteQuery, [id]);
-
-    if (result.rowCount === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "ไม่พบบทเรียนที่ต้องการลบ" });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: "ลบบทเรียนและข้อสอบเรียบร้อยแล้ว",
-    });
-  } catch (error) {
-    console.error("Delete Chapter Error:", error);
-    res
-      .status(500)
-      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
-  }
-};
-
-// --- GET CHAPTER BY ID (ดึงข้อมูลบทเรียน 1 รายการเพื่อไปแสดงในหน้า Edit) ---
+// --- GET CHAPTER BY ID (ดึงบทเรียนตาม ID เพื่อแก้ไข) ---
 exports.getChapterById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // ดึงข้อมูลบทเรียน
     const chapterResult = await db.query(
       "SELECT * FROM chapters WHERE id = $1",
       [id],
@@ -1026,21 +1005,18 @@ exports.getChapterById = async (req, res) => {
     }
     const chapter = chapterResult.rows[0];
 
-    // ดึงข้อมูลข้อสอบ
     const questionsResult = await db.query(
       "SELECT * FROM questions WHERE chapter_id = $1 ORDER BY id ASC",
       [id],
     );
 
-    // จัด Format ข้อสอบให้ตรงกับที่หน้าบ้าน (Frontend) ใช้
     const questions = questionsResult.rows.map((q) => ({
       id: q.id,
       questionText: q.question_text,
-      options: q.options, // Neon (pg) จะแปลง JSONB กลับเป็น Array ให้อัตโนมัติ
+      options: q.options,
       correctAnswer: q.correct_answer,
     }));
 
-    // แปลงตัวเลขกลุ่มกลับเป็น String สำหรับ Select Option
     let targetRole = "Group 1";
     if (chapter.target_group === 2) targetRole = "Group 2";
     else if (chapter.target_group === 3) targetRole = "Group 3";
@@ -1052,6 +1028,7 @@ exports.getChapterById = async (req, res) => {
         targetRole: targetRole,
         status: chapter.status,
         videoUrl: chapter.video_url,
+        passingPercentage: chapter.passing_percentage || 80, // ส่งเกณฑ์กลับไปแสดงผล
         questions: questions,
       },
     });
@@ -1068,7 +1045,15 @@ exports.updateChapter = async (req, res) => {
   let client;
   try {
     const { id } = req.params;
-    const { title, targetRole, status, videoUrl, questions } = req.body;
+    // รับค่า passingPercentage เพิ่มเข้ามาจาก Payload
+    const {
+      title,
+      targetRole,
+      status,
+      videoUrl,
+      questions,
+      passingPercentage,
+    } = req.body;
 
     let targetGroup = 1;
     if (targetRole === "Group 2") targetGroup = 2;
@@ -1077,21 +1062,22 @@ exports.updateChapter = async (req, res) => {
     client = await db.getClient();
     await client.query("BEGIN");
 
-    // 1. อัปเดตข้อมูลบทเรียนหลัก
+    // 1. อัปเดตข้อมูลบทเรียนหลักรวมถึงเกณฑ์ผ่านคะแนน
     const updateChapterQuery = `
       UPDATE chapters 
-      SET title = $1, target_group = $2, video_url = $3, status = $4, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $5
+      SET title = $1, target_group = $2, video_url = $3, status = $4, passing_percentage = $5, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $6
     `;
     await client.query(updateChapterQuery, [
       title,
       targetGroup,
       videoUrl,
       status,
+      passingPercentage ? parseInt(passingPercentage) : 80,
       id,
     ]);
 
-    // 2. ลบข้อสอบชุดเก่าทิ้งทั้งหมด (อิงจาก chapter_id)
+    // 2. ลบข้อสอบชุดเก่าทิ้งทั้งหมด
     await client.query("DELETE FROM questions WHERE chapter_id = $1", [id]);
 
     // 3. Insert ข้อสอบชุดใหม่เข้าไปแทน
@@ -1122,5 +1108,168 @@ exports.updateChapter = async (req, res) => {
       .json({ success: false, message: "เกิดข้อผิดพลาดในการอัปเดตข้อมูล" });
   } finally {
     if (client) client.release();
+  }
+};
+
+// --- DELETE CHAPTER (ลบบทเรียน - โค้ดเดิมคงไว้) ---
+exports.deleteChapter = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleteQuery = "DELETE FROM chapters WHERE id = $1 RETURNING id";
+    const result = await db.query(deleteQuery, [id]);
+
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบบทเรียนที่ต้องการลบ" });
+    }
+    res
+      .status(200)
+      .json({ success: true, message: "ลบบทเรียนและข้อสอบเรียบร้อยแล้ว" });
+  } catch (error) {
+    console.error("Delete Chapter Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
+// ==========================================
+// ฟังก์ชันใหม่: ระบบดูรายชื่อผู้ได้รับใบประกาศนียบัตร (Certificates)
+// ==========================================
+
+exports.getCertificates = async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        c.id AS "certId",
+        c.course_group AS "courseGroup",
+        c.issued_at AS "issuedAt",
+        p.first_name_th || ' ' || p.last_name_th AS "userName",
+        p.email AS "userEmail",
+        o.org_name AS "orgName" -- แก้เป็น org_name ตามโครงสร้าง DB จริง
+      FROM certificates c
+      JOIN users u ON c.user_id = u.id
+      LEFT JOIN profiles p ON u.id = p.user_id
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      ORDER BY c.issued_at DESC
+    `;
+    const result = await db.query(query);
+    res.status(200).json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Certificates Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "ไม่สามารถดึงข้อมูลประวัติการออกใบเซอร์ได้",
+    });
+  }
+};
+
+// 2. ลบ/เพิกถอนประวัติใบประกาศนียบัตร
+exports.deleteCertificate = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await db.query(
+      "DELETE FROM certificates WHERE id = $1 RETURNING id",
+      [id],
+    );
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบรายการใบประกาศฯ ที่ต้องการลบ" });
+    }
+    res
+      .status(200)
+      .json({ success: true, message: "ลบประวัติใบประกาศนียบัตรสำเร็จ" });
+  } catch (error) {
+    console.error("Delete Certificate Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
+// ==========================================
+// ฟังก์ชันใหม่: จัดการแม่แบบใบประกาศนียบัตร (Certificate Settings)
+// ==========================================
+
+// 1. ดึงข้อมูลการตั้งค่าแม่แบบใบประกาศฯ ตามกลุ่มหลักสูตร
+exports.getCertificateSettings = async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const result = await db.query(
+      "SELECT * FROM certificate_settings WHERE course_group = $1",
+      [parseInt(groupId)],
+    );
+
+    // ถ้ายังไม่มีการตั้งค่า ส่งค่าว่างกลับไป
+    if (result.rows.length === 0) {
+      return res.status(200).json({ success: true, data: null });
+    }
+
+    res.status(200).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("Get Certificate Settings Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "ไม่สามารถดึงข้อมูลการตั้งค่าใบประกาศฯ ได้",
+    });
+  }
+};
+
+exports.saveCertificateSettings = async (req, res) => {
+  try {
+    const {
+      course_group,
+      course_name, // <--- 1. เพิ่มตัวแปรนี้
+      background_url,
+      logo_url,
+      signatory_name,
+      signatory_position,
+      signature_url,
+    } = req.body;
+
+    if (!course_group) {
+      return res
+        .status(400)
+        .json({ success: false, message: "กรุณาระบุกลุ่มหลักสูตร" });
+    }
+
+    const upsertQuery = `
+      INSERT INTO certificate_settings 
+        (course_group, course_name, background_url, logo_url, signatory_name, signatory_position, signature_url) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7)  -- <--- 2. เพิ่ม $2 และขยับเลขที่เหลือ
+      ON CONFLICT (course_group)
+      DO UPDATE SET
+        course_name = EXCLUDED.course_name, -- <--- 3. ให้มันอัปเดตค่าได้
+        background_url = EXCLUDED.background_url,
+        logo_url = EXCLUDED.logo_url,
+        signatory_name = EXCLUDED.signatory_name,
+        signatory_position = EXCLUDED.signatory_position,
+        signature_url = EXCLUDED.signature_url,
+        updated_at = CURRENT_TIMESTAMP
+    `;
+
+    await db.query(upsertQuery, [
+      parseInt(course_group),
+      course_name, // <--- 4. ใส่ค่าส่งไปใน Array
+      background_url,
+      logo_url,
+      signatory_name,
+      signatory_position,
+      signature_url,
+    ]);
+
+    res
+      .status(200)
+      .json({ success: true, message: "บันทึกแม่แบบใบประกาศนียบัตรสำเร็จ" });
+  } catch (error) {
+    console.error("Save Certificate Settings Error:", error);
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "เกิดข้อผิดพลาดในการบันทึกข้อมูลแม่แบบ",
+      });
   }
 };
