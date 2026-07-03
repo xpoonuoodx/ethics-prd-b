@@ -3,7 +3,7 @@ const cors = require("cors");
 const { swaggerUi, swaggerSpec } = require("./config/swagger");
 
 const authRoutes = require("./routes/authRoutes");
-// const userRoutes = require("./routes/userRoutes");
+const userRoutes = require("./routes/userRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const regulatorRoutes = require("./routes/regulatorRoutes");
 // const masterRoutes = require('./routes/masterRoutes');
@@ -37,7 +37,7 @@ app.use(
 // Routes
 // app.use('/', homeRoutes);
 app.use("/auth", authRoutes);
-// app.use("/user", userRoutes);
+app.use("/user", userRoutes);
 app.use("/admin", adminRoutes);
 app.use("/regulator", regulatorRoutes);
 ////
