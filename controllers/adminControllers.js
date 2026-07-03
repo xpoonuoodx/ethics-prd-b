@@ -1265,11 +1265,40 @@ exports.saveCertificateSettings = async (req, res) => {
       .json({ success: true, message: "บันทึกแม่แบบใบประกาศนียบัตรสำเร็จ" });
   } catch (error) {
     console.error("Save Certificate Settings Error:", error);
-    res
-      .status(500)
-      .json({
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการบันทึกข้อมูลแม่แบบ",
+    });
+  }
+};
+
+exports.deleteOrganization = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ลบข้อมูลจากฐานข้อมูล (สมมติว่าตารางชื่อ organizations)
+    // หากมีการเชื่อมโยง Foreign Key ไว้ แนะนำให้ตั้ง ON DELETE CASCADE ที่ตารางลูกด้วย
+    const result = await db.query(
+      "DELETE FROM organizations WHERE org_code = $1 RETURNING *",
+      [id],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
         success: false,
-        message: "เกิดข้อผิดพลาดในการบันทึกข้อมูลแม่แบบ",
+        message: "ไม่พบข้อมูลหน่วยงานที่ต้องการลบในระบบ",
       });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "ลบข้อมูลหน่วยงานสำเร็จ",
+    });
+  } catch (error) {
+    console.error("Delete Organization Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดทางเซิร์ฟเวอร์ ไม่สามารถลบข้อมูลได้",
+    });
   }
 };

@@ -30,4 +30,10 @@ router.delete(
   userControllers.deleteUserToolHistory,
 ); // เส้นทางใหม่สำหรับลบข้อมูล
 
+router.get(
+  "/certificates/:userId",
+  verifyToken,
+  userControllers.getUserCertificates,
+);
+
 module.exports = router;

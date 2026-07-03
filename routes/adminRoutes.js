@@ -109,4 +109,10 @@ router.post(
   adminControllers.saveCertificateSettings,
 );
 
+router.delete(
+  "/delete-organize/:id",
+  verifyToken,
+  adminControllers.deleteOrganization,
+);
+
 module.exports = router;

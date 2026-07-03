@@ -326,31 +326,61 @@ exports.getTestQuestions = async (req, res) => {
   }
 };
 
-// ==========================================
-// 3. ส่งคำตอบและบันทึกคะแนน (UserTestDetail.jsx)
-// ==========================================
 exports.submitTestResult = async (req, res) => {
   try {
     const { userId, chapterId, score, totalQuestions, passingPercentage } =
       req.body;
 
-    // คำนวณเปอร์เซ็นต์ว่าผ่านหรือไม่
+    // 1. คำนวณเปอร์เซ็นต์ว่าผ่านหรือไม่
     const scorePercentage = (score / totalQuestions) * 100;
     const isPassed = scorePercentage >= passingPercentage;
 
-    // อัปเดตตาราง user_progress (แบบ Upsert: มีให้ Update / ไม่มีให้ Insert)
-    const upsertQuery = `
-      INSERT INTO user_progress (user_id, chapter_id, is_passed, score, attempt_count)
-      VALUES ($1, $2, $3, $4, 1)
-      ON CONFLICT (user_id, chapter_id) 
-      DO UPDATE SET 
-        is_passed = CASE WHEN EXCLUDED.is_passed = true THEN true ELSE user_progress.is_passed END,
-        score = GREATEST(user_progress.score, EXCLUDED.score),
-        attempt_count = user_progress.attempt_count + 1,
-        updated_at = CURRENT_TIMESTAMP
-    `;
-    await db.query(upsertQuery, [userId, chapterId, isPassed, score]);
+    // 2. เช็คว่าผู้ใช้เคยทำแบบทดสอบบทนี้หรือยัง
+    const checkQuery = `SELECT * FROM user_progress WHERE user_id = $1 AND chapter_id = $2`;
+    const checkResult = await db.query(checkQuery, [userId, chapterId]);
 
+    if (checkResult.rows.length > 0) {
+      // ==========================================
+      // กรณีเคยทำข้อสอบบทนี้แล้ว (UPDATE ข้อมูลเดิม)
+      // ==========================================
+      const existingRecord = checkResult.rows[0];
+
+      // นับจำนวนครั้งที่ทำเพิ่มขึ้น 1
+      const newAttemptCount = (existingRecord.attempt_count || 0) + 1;
+      // เก็บข้อสอบครั้งที่ได้คะแนนเยอะที่สุด
+      const bestScore = Math.max(existingRecord.score || 0, score);
+      // ถ้าเคยผ่านแล้วให้ถือว่าผ่านเลย (true) แต่ถ้ายังให้ใช้ค่า isPassed ของรอบนี้
+      const finalIsPassed = existingRecord.is_passed ? true : isPassed;
+
+      const updateQuery = `
+        UPDATE user_progress
+        SET 
+          score = $1,
+          is_passed = $2,
+          attempt_count = $3,
+          last_attempt_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $4
+      `;
+      await db.query(updateQuery, [
+        bestScore,
+        finalIsPassed,
+        newAttemptCount,
+        existingRecord.id,
+      ]);
+    } else {
+      // ==========================================
+      // กรณีเพิ่งทำข้อสอบบทนี้เป็นครั้งแรก (INSERT ข้อมูลใหม่)
+      // ==========================================
+      const insertQuery = `
+        INSERT INTO user_progress 
+        (user_id, chapter_id, score, is_passed, attempt_count, last_attempt_at, updated_at)
+        VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `;
+      await db.query(insertQuery, [userId, chapterId, score, isPassed]);
+    }
+
+    // 3. ส่งผลลัพธ์กลับไปให้หน้าบ้าน (เพื่อไปโชว์ในหน้า UserResult)
     res.status(200).json({
       success: true,
       data: { score, totalQuestions, isPassed, scorePercentage },
@@ -504,12 +534,10 @@ exports.getUserToolsHistoryList = async (req, res) => {
     res.status(200).json({ success: true, data: formattedData });
   } catch (error) {
     console.error("Get Tools History List Error:", error);
-    res
-      .status(500)
-      .json({
-        success: false,
-        message: "เกิดข้อผิดพลาดในการดึงประวัติการประเมิน",
-      });
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงประวัติการประเมิน",
+    });
   }
 };
 
@@ -526,5 +554,45 @@ exports.deleteUserToolHistory = async (req, res) => {
   } catch (error) {
     console.error("Delete Tool History Error:", error);
     res.status(500).json({ success: false, message: "ลบข้อมูลไม่สำเร็จ" });
+  }
+};
+
+exports.getUserCertificates = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // ค้นหาประวัติที่สอบผ่าน (is_passed = true) โยงกับชื่อบทเรียน
+    const query = `
+      SELECT 
+        c.id AS "chapterId", 
+        c.title AS "chapterTitle",
+        up.score, 
+        up.updated_at AS "passDate",
+        (SELECT COUNT(*) FROM questions q WHERE q.chapter_id = c.id) AS "totalQuestions"
+      FROM user_progress up
+      JOIN chapters c ON up.chapter_id = c.id
+      WHERE up.user_id = $1 AND up.is_passed = true
+      ORDER BY up.updated_at DESC
+    `;
+
+    const result = await db.query(query, [userId]);
+
+    // Format วันที่ให้หน้าบ้าน
+    const formattedData = result.rows.map((row) => ({
+      ...row,
+      passDate: new Date(row.passDate).toLocaleDateString("th-TH", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      }),
+    }));
+
+    res.status(200).json({ success: true, data: formattedData });
+  } catch (error) {
+    console.error("Get Certificates Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงใบประกาศนียบัตร",
+    });
   }
 };
