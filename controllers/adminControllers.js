@@ -179,6 +179,34 @@ exports.getUsers = async (req, res) => {
   }
 };
 
+exports.deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. ตรวจสอบว่ามีผู้ใช้งานนี้ในระบบหรือไม่
+    const checkUser = await db.query("SELECT * FROM users WHERE id = $1", [id]);
+    if (checkUser.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบผู้ใช้งานนี้ในระบบ" });
+    }
+
+    // 2. ลบข้อมูลโปรไฟล์ (Profiles) ของผู้ใช้งานคนนี้ออกก่อนเพื่อป้องกันการติด Constraint (Foreign Key)
+    await db.query("DELETE FROM profiles WHERE user_id = $1", [id]);
+
+    // 3. ลบข้อมูลออกจากตาราง users หลัก
+    await db.query("DELETE FROM users WHERE id = $1", [id]);
+
+    res.status(200).json({ success: true, message: "ลบข้อมูลผู้ใช้งานสำเร็จ" });
+  } catch (error) {
+    console.error("Delete User Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการลบผู้ใช้งาน อาจมีข้อมูลอื่นผูกมัดอยู่",
+    });
+  }
+};
+
 exports.addUser = async (req, res) => {
   // รับข้อมูลเพิ่มเติม email และ id_card จากหน้าบ้าน
   const { username, password, name, email, id_card, role, org_id } = req.body;

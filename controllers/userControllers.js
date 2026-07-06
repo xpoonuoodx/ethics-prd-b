@@ -273,9 +273,6 @@ exports.getUserTestsList = async (req, res) => {
   }
 };
 
-// ==========================================
-// 2. ดึงรายละเอียดและคำถามของ 1 แบบทดสอบ (UserTestDetail.jsx)
-// ==========================================
 exports.getTestQuestions = async (req, res) => {
   try {
     const { chapterId } = req.params;
@@ -290,24 +287,38 @@ exports.getTestQuestions = async (req, res) => {
         .json({ success: false, message: "ไม่พบแบบทดสอบนี้" });
     }
 
-    // ดึงคำถาม (สมมติว่าตาราง questions มีคอลัมน์ question, choice_a, choice_b, choice_c, choice_d, correct_choice)
-    const questionsQuery = `SELECT * FROM questions WHERE chapter_id = $1 ORDER BY id ASC`;
+    // ดึงคำถามจาก DB ตาม Schema จริงของคุณ
+    const questionsQuery = `SELECT id, question_text, options, correct_answer FROM questions WHERE chapter_id = $1 ORDER BY id ASC`;
     const questionsResult = await db.query(questionsQuery, [chapterId]);
 
-    // แปลงโครงสร้างให้หน้าบ้านใช้งานง่ายขึ้น (จัด choice ลง Array)
+    // แปลงข้อมูลและสลับช้อยส์ (Shuffle Options)
     const formattedQuestions = questionsResult.rows.map((q) => {
-      // *หมายเหตุ: หากชื่อคอลัมน์ใน DB คุณต่างไปจากนี้ (เช่น choice_1) ให้แก้ตรงนี้ให้ตรงกันครับ
-      const options = [q.choice_a, q.choice_b, q.choice_c, q.choice_d];
-      // สมมติว่า correct_choice เก็บค่า 'A','B','C','D' เราจะแปลงเป็น index 0,1,2,3
-      const answerIndex = ["A", "B", "C", "D"].indexOf(
-        q.correct_choice ? q.correct_choice.toUpperCase() : "A",
-      );
+      // ป้องกันกรณี options เป็น string ต้อง parse เป็น array ก่อน
+      const optionsArray =
+        typeof q.options === "string" ? JSON.parse(q.options) : q.options;
+
+      // หา Text ของคำตอบที่ถูกต้องก่อนสลับตำแหน่ง
+      const correctIndexDB = parseInt(q.correct_answer, 10) || 0;
+      const correctText = optionsArray[correctIndexDB];
+
+      // สลับตำแหน่งช้อยส์ (Fisher-Yates Shuffle)
+      let shuffledOptions = [...optionsArray];
+      for (let i = shuffledOptions.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffledOptions[i], shuffledOptions[j]] = [
+          shuffledOptions[j],
+          shuffledOptions[i],
+        ];
+      }
+
+      // หา Index ใหม่ของคำตอบที่ถูกต้องหลังจากสลับแล้ว
+      const newCorrectIndex = shuffledOptions.indexOf(correctText);
 
       return {
         id: q.id,
-        q: q.question || q.question_text,
-        options: options,
-        answer: answerIndex !== -1 ? answerIndex : 0,
+        q: q.question_text,
+        options: shuffledOptions,
+        answer: newCorrectIndex,
       };
     });
 
@@ -331,25 +342,16 @@ exports.submitTestResult = async (req, res) => {
     const { userId, chapterId, score, totalQuestions, passingPercentage } =
       req.body;
 
-    // 1. คำนวณเปอร์เซ็นต์ว่าผ่านหรือไม่
     const scorePercentage = (score / totalQuestions) * 100;
     const isPassed = scorePercentage >= passingPercentage;
 
-    // 2. เช็คว่าผู้ใช้เคยทำแบบทดสอบบทนี้หรือยัง
     const checkQuery = `SELECT * FROM user_progress WHERE user_id = $1 AND chapter_id = $2`;
     const checkResult = await db.query(checkQuery, [userId, chapterId]);
 
     if (checkResult.rows.length > 0) {
-      // ==========================================
-      // กรณีเคยทำข้อสอบบทนี้แล้ว (UPDATE ข้อมูลเดิม)
-      // ==========================================
       const existingRecord = checkResult.rows[0];
-
-      // นับจำนวนครั้งที่ทำเพิ่มขึ้น 1
       const newAttemptCount = (existingRecord.attempt_count || 0) + 1;
-      // เก็บข้อสอบครั้งที่ได้คะแนนเยอะที่สุด
       const bestScore = Math.max(existingRecord.score || 0, score);
-      // ถ้าเคยผ่านแล้วให้ถือว่าผ่านเลย (true) แต่ถ้ายังให้ใช้ค่า isPassed ของรอบนี้
       const finalIsPassed = existingRecord.is_passed ? true : isPassed;
 
       const updateQuery = `
@@ -369,9 +371,6 @@ exports.submitTestResult = async (req, res) => {
         existingRecord.id,
       ]);
     } else {
-      // ==========================================
-      // กรณีเพิ่งทำข้อสอบบทนี้เป็นครั้งแรก (INSERT ข้อมูลใหม่)
-      // ==========================================
       const insertQuery = `
         INSERT INTO user_progress 
         (user_id, chapter_id, score, is_passed, attempt_count, last_attempt_at, updated_at)
@@ -380,7 +379,6 @@ exports.submitTestResult = async (req, res) => {
       await db.query(insertQuery, [userId, chapterId, score, isPassed]);
     }
 
-    // 3. ส่งผลลัพธ์กลับไปให้หน้าบ้าน (เพื่อไปโชว์ในหน้า UserResult)
     res.status(200).json({
       success: true,
       data: { score, totalQuestions, isPassed, scorePercentage },

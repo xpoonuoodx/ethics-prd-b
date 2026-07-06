@@ -10,6 +10,7 @@ router.get("/get-organize", verifyToken, adminControllers.getOrganizations);
 router.post("/add-organize", verifyToken, adminControllers.addOrganization);
 router.get("/get-regulators", verifyToken, adminControllers.getRegulators);
 router.get("/get-users", verifyToken, adminControllers.getUsers);
+router.delete("/delete-user/:id", verifyToken, adminControllers.deleteUser);
 router.post("/add-user", verifyToken, adminControllers.addUser);
 
 router.get(
