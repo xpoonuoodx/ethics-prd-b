@@ -8,10 +8,14 @@ router.get("/dashboard", verifyToken, adminControllers.getDashboard);
 // เพิ่มเส้นทางสำหรับดึงข้อมูลและเพิ่มข้อมูลหน่วยงาน
 router.get("/get-organize", verifyToken, adminControllers.getOrganizations);
 router.post("/add-organize", verifyToken, adminControllers.addOrganization);
+router.put("/edit-organize/:id", verifyToken, adminControllers.editOrganize);
 router.get("/get-regulators", verifyToken, adminControllers.getRegulators);
 router.get("/get-users", verifyToken, adminControllers.getUsers);
 router.delete("/delete-user/:id", verifyToken, adminControllers.deleteUser);
 router.post("/add-user", verifyToken, adminControllers.addUser);
+
+router.get("/view-user/:id", verifyToken, adminControllers.viewUser);
+router.put("/edit-user/:id", verifyToken, adminControllers.editUser);
 
 router.get(
   "/view-organize/:id",

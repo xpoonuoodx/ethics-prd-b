@@ -131,6 +131,48 @@ exports.addOrganization = async (req, res) => {
   }
 };
 
+exports.editOrganize = async (req, res) => {
+  try {
+    const { id } = req.params; // อาจจะเป็นเลข id หรือ org_code เช่น ORG-001 ตามที่รับมาจากหน้าเว็บ
+    const { org_name } = req.body;
+
+    if (!org_name || org_name.trim() === "") {
+      return res
+        .status(400)
+        .json({ success: false, message: "กรุณาระบุชื่อหน่วยงาน" });
+    }
+
+    // คำสั่งอัปเดต โดยครอบคลุมกรณีที่ส่งมาเป็นเลข ID หรือรหัส org_code (รองรับความยืดหยุ่น)
+    const updateQuery = `
+      UPDATE organizations 
+      SET org_name = $1, updated_at = CURRENT_TIMESTAMP 
+      WHERE id::text = $2 OR org_code = $2
+      RETURNING *
+    `;
+
+    const result = await db.query(updateQuery, [org_name, id]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบหน่วยงานที่ต้องการแก้ไขในระบบ",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "แก้ไขชื่อหน่วยงานสำเร็จ",
+      data: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Edit Organize Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดจากเซิร์ฟเวอร์ ไม่สามารถแก้ไขชื่อได้",
+    });
+  }
+};
+
 // 4. ดึงรายชื่อคนที่มีสิทธิ์เป็นผู้กำกับดูแล (เพื่อใส่ใน Dropdown)
 exports.getRegulators = async (req, res) => {
   try {
@@ -287,6 +329,89 @@ exports.addUser = async (req, res) => {
       success: false,
       message: "เกิดข้อผิดพลาดในการบันทึกบัญชีลงฐานข้อมูล",
     });
+  }
+};
+
+exports.viewUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = `
+      SELECT 
+        u.id, 
+        u.username, 
+        u.role, 
+        p.email,
+        p.id_card,
+        p.first_name_th || ' ' || p.last_name_th AS name, 
+        o.org_name 
+      FROM users u 
+      LEFT JOIN profiles p ON u.id = p.user_id 
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      WHERE u.id = $1
+    `;
+    const result = await db.query(query, [id]);
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบผู้ใช้งานนี้ในระบบ" });
+    }
+
+    res.status(200).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("View User Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการโหลดข้อมูลผู้ใช้" });
+  }
+};
+
+// ==========================================
+// ส่วนที่เพิ่มใหม่: อัปเดตชื่อผู้ใช้ (Edit Name)
+// ==========================================
+exports.editUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body; // รับค่าชื่อ-นามสกุล ที่ส่งมาจากฟอร์ม Modal
+
+    if (!name || name.trim() === "") {
+      return res
+        .status(400)
+        .json({ success: false, message: "กรุณาระบุชื่อ-นามสกุล" });
+    }
+
+    // ทำการแยกชื่อกับนามสกุลด้วยช่องว่าง
+    const nameParts = name.trim().split(" ");
+    const firstName = nameParts[0];
+    // ถ้านามสกุลไม่มี ให้ใส่ค่าว่างไว้
+    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
+
+    const updateQuery = `
+      UPDATE profiles 
+      SET first_name_th = $1, last_name_th = $2, updated_at = CURRENT_TIMESTAMP 
+      WHERE user_id = $3
+      RETURNING *
+    `;
+    const result = await db.query(updateQuery, [firstName, lastName, id]);
+
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({
+          success: false,
+          message: "ไม่พบข้อมูลโปรไฟล์ผู้ใช้งานเพื่อทำการอัปเดต",
+        });
+    }
+
+    res.status(200).json({ success: true, message: "แก้ไขชื่อ-นามสกุลสำเร็จ" });
+  } catch (error) {
+    console.error("Edit User Error:", error);
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "เกิดข้อผิดพลาดจากเซิร์ฟเวอร์ ไม่สามารถแก้ไขข้อมูลได้",
+      });
   }
 };
 
