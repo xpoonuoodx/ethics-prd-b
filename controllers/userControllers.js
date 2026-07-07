@@ -429,16 +429,20 @@ exports.generateToolResult = async (req, res) => {
 
     // 2. แปลง User Type เป็น Role สำหรับดึง Components
     let roleStr = "user";
-    if (
-      userType.toLowerCase().includes("regulator") ||
-      userType.toLowerCase().includes("policy")
-    ) {
+    if (userType.toLowerCase().includes("regulator")) {
       roleStr = "regulator";
-    } else if (
-      userType.toLowerCase().includes("provider") ||
-      userType.toLowerCase().includes("researcher")
-    ) {
+    } else if (userType.toLowerCase().includes("policy")) {
+      roleStr = "policy";
+    } else if (userType.toLowerCase().includes("researcher")) {
       roleStr = "researcher";
+    } else if (userType.toLowerCase().includes("developer")) {
+      roleStr = "developer";
+    } else if (
+      userType.toLowerCase().includes("provider")) {
+      roleStr = "provider";
+    } else if (
+      userType.toLowerCase().includes("users")) {
+      roleStr = "users";
     }
 
     // 3. ดึง Components ที่เกี่ยวข้อง

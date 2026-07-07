@@ -162,12 +162,10 @@ exports.addUser = async (req, res) => {
       );
       if (checkIdCard.rows.length > 0) {
         await db.query("ROLLBACK");
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
-          });
+        return res.status(400).json({
+          success: false,
+          message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
+        });
       }
     }
 
@@ -233,6 +231,92 @@ exports.deleteUser = async (req, res) => {
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
+exports.viewUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ดึงข้อมูลพื้นฐานคล้ายของแอดมิน แต่อาจต้องตรวจสอบให้แน่ใจว่า user คนนี้อยู่ใต้ org เดียวกัน (ถ้ามีระบบจำกัด)
+    const query = `
+      SELECT 
+        u.id, 
+        u.username, 
+        p.email,
+        p.id_card,
+        p.first_name_th || ' ' || p.last_name_th AS name, 
+        u.user_type, 
+        o.org_name 
+      FROM users u 
+      LEFT JOIN profiles p ON u.id = p.user_id 
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      WHERE u.id = $1
+    `;
+    const result = await db.query(query, [id]);
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบผู้ใช้งานนี้ในระบบ" });
+    }
+
+    res.status(200).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("View User Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการโหลดข้อมูลผู้ใช้" });
+  }
+};
+
+// ==========================================
+// ส่วนที่เพิ่มใหม่: แก้ไขชื่อและอีเมล สำหรับ Regulator
+// ==========================================
+exports.editUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, email } = req.body;
+
+    if (!name || name.trim() === "" || !email || email.trim() === "") {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาระบุชื่อ-นามสกุล และ อีเมลให้ครบถ้วน",
+      });
+    }
+
+    // ทำการแยกชื่อกับนามสกุลด้วยช่องว่าง
+    const nameParts = name.trim().split(" ");
+    const firstName = nameParts[0];
+    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
+
+    const updateQuery = `
+      UPDATE profiles 
+      SET first_name_th = $1, last_name_th = $2, email = $3, updated_at = CURRENT_TIMESTAMP 
+      WHERE user_id = $4
+      RETURNING *
+    `;
+    const result = await db.query(updateQuery, [
+      firstName,
+      lastName,
+      email,
+      id,
+    ]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบข้อมูลโปรไฟล์ผู้ใช้งานเพื่อทำการอัปเดต",
+      });
+    }
+
+    res.status(200).json({ success: true, message: "อัปเดตข้อมูลสำเร็จ" });
+  } catch (error) {
+    console.error("Edit User Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดจากเซิร์ฟเวอร์ ไม่สามารถแก้ไขข้อมูลได้",
+    });
   }
 };
 
@@ -376,12 +460,10 @@ exports.assignUserToProject = async (req, res) => {
       [project_id, user_id],
     );
     if (checkExist.rows.length > 0) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "บุคลากรท่านนี้อยู่ในโครงการอยู่แล้ว",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "บุคลากรท่านนี้อยู่ในโครงการอยู่แล้ว",
+      });
     }
 
     await db.query(
@@ -418,12 +500,10 @@ exports.viewProject = async (req, res) => {
     );
 
     if (projectResult.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message: "ไม่พบข้อมูลโครงการ หรือคุณไม่มีสิทธิ์เข้าถึง",
-        });
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบข้อมูลโครงการ หรือคุณไม่มีสิทธิ์เข้าถึง",
+      });
     }
 
     const projectData = projectResult.rows[0];

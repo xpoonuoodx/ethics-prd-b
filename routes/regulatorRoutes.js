@@ -8,6 +8,8 @@ router.get("/dashboard", verifyToken, regulatorControllers.getDashboard);
 router.get("/get-users", verifyToken, regulatorControllers.getUsers);
 router.post("/add-user", verifyToken, regulatorControllers.addUser);
 router.delete("/delete-user/:id", verifyToken, regulatorControllers.deleteUser);
+router.get("/view-user/:id", verifyToken, regulatorControllers.viewUser);
+router.put("/edit-user/:id", verifyToken, regulatorControllers.editUser);
 
 router.get("/get-projects", verifyToken, regulatorControllers.getProjects);
 router.post("/add-project", verifyToken, regulatorControllers.addProject);
