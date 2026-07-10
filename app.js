@@ -6,6 +6,7 @@ const authRoutes = require("./routes/authRoutes");
 const userRoutes = require("./routes/userRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const regulatorRoutes = require("./routes/regulatorRoutes");
+const publicRoutes = require("./routes/publicRoutes");
 // const masterRoutes = require('./routes/masterRoutes');
 // const homeRoutes = require('./routes/homeRoutes')
 
@@ -36,6 +37,7 @@ app.use(
 
 // Routes
 // app.use('/', homeRoutes);
+app.use('/public', publicRoutes);
 app.use("/auth", authRoutes);
 app.use("/user", userRoutes);
 app.use("/admin", adminRoutes);

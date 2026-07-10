@@ -156,7 +156,7 @@ exports.getUserClassroom = async (req, res) => {
       typeStr.includes("researcher")
     ) {
       targetGroup = 2;
-      courseTitle = "หลักสูตรสำหรับนักพัฒนา (Service Provider)";
+      courseTitle = "หลักสูตรสำหรับนักพัฒนา (Researcher, Developer, Service Provider)";
       courseDesc =
         "เรียนรู้การออกแบบและพัฒนาโมเดล AI ที่มีความโปร่งใส อธิบายได้ และลดความลำเอียง";
     }
@@ -348,20 +348,17 @@ exports.submitTestResult = async (req, res) => {
     const checkQuery = `SELECT * FROM user_progress WHERE user_id = $1 AND chapter_id = $2`;
     const checkResult = await db.query(checkQuery, [userId, chapterId]);
 
+    let finalIsPassed = isPassed;
+
     if (checkResult.rows.length > 0) {
       const existingRecord = checkResult.rows[0];
       const newAttemptCount = (existingRecord.attempt_count || 0) + 1;
       const bestScore = Math.max(existingRecord.score || 0, score);
-      const finalIsPassed = existingRecord.is_passed ? true : isPassed;
+      finalIsPassed = existingRecord.is_passed ? true : isPassed;
 
       const updateQuery = `
         UPDATE user_progress
-        SET 
-          score = $1,
-          is_passed = $2,
-          attempt_count = $3,
-          last_attempt_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
+        SET score = $1, is_passed = $2, attempt_count = $3, last_attempt_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
         WHERE id = $4
       `;
       await db.query(updateQuery, [
@@ -372,16 +369,85 @@ exports.submitTestResult = async (req, res) => {
       ]);
     } else {
       const insertQuery = `
-        INSERT INTO user_progress 
-        (user_id, chapter_id, score, is_passed, attempt_count, last_attempt_at, updated_at)
+        INSERT INTO user_progress (user_id, chapter_id, score, is_passed, attempt_count, last_attempt_at, updated_at)
         VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `;
       await db.query(insertQuery, [userId, chapterId, score, isPassed]);
     }
 
+    const targetQuery = await db.query(
+      `SELECT target_group FROM chapters WHERE id = $1`,
+      [chapterId],
+    );
+    const targetGroup = targetQuery.rows[0].target_group;
+
+    const totalChaptersResult = await db.query(
+      `
+      SELECT COUNT(DISTINCT q.chapter_id) as total 
+      FROM questions q
+      JOIN chapters c ON q.chapter_id = c.id
+      WHERE c.target_group = $1
+    `,
+      [targetGroup],
+    );
+    const totalTestableChapters = parseInt(totalChaptersResult.rows[0].total);
+
+    const passedChaptersResult = await db.query(
+      `
+      SELECT COUNT(DISTINCT up.chapter_id) as passed_count 
+      FROM user_progress up
+      JOIN chapters c ON up.chapter_id = c.id
+      WHERE up.user_id = $1 AND up.is_passed = true AND c.target_group = $2
+    `,
+      [userId, targetGroup],
+    );
+    const passedChaptersCount = parseInt(
+      passedChaptersResult.rows[0].passed_count,
+    );
+
+    const isAllPassed =
+      totalTestableChapters > 0 && passedChaptersCount >= totalTestableChapters;
+
+    let certSettings = null;
+
+    if (isAllPassed) {
+      const courseGroupId = targetGroup;
+      let certId;
+
+      const checkCert = await db.query(
+        `SELECT id FROM certificates WHERE user_id = $1 AND course_group = $2`,
+        [userId, courseGroupId],
+      );
+
+      if (checkCert.rows.length === 0) {
+        const insertCert = await db.query(
+          `INSERT INTO certificates (user_id, course_group, issued_at) VALUES ($1, $2, CURRENT_TIMESTAMP) RETURNING id`,
+          [userId, courseGroupId],
+        );
+        certId = insertCert.rows[0].id;
+      } else {
+        certId = checkCert.rows[0].id;
+      }
+
+      // ดึงการตั้งค่าแม่แบบของกลุ่มนี้แนบกลับไปด้วย
+      const settingsQuery = await db.query(
+        `SELECT * FROM certificate_settings WHERE course_group = $1`,
+        [courseGroupId],
+      );
+      certSettings = settingsQuery.rows[0] || {};
+      certSettings.certId = certId; // แนบไอดีกลับไปเพื่อทำรหัส
+    }
+
     res.status(200).json({
       success: true,
-      data: { score, totalQuestions, isPassed, scorePercentage },
+      data: {
+        score,
+        totalQuestions,
+        isPassed: finalIsPassed,
+        scorePercentage,
+        isAllPassed,
+        certSettings,
+      },
     });
   } catch (error) {
     console.error("Submit Test Error:", error);
@@ -437,11 +503,9 @@ exports.generateToolResult = async (req, res) => {
       roleStr = "researcher";
     } else if (userType.toLowerCase().includes("developer")) {
       roleStr = "developer";
-    } else if (
-      userType.toLowerCase().includes("provider")) {
+    } else if (userType.toLowerCase().includes("provider")) {
       roleStr = "provider";
-    } else if (
-      userType.toLowerCase().includes("users")) {
+    } else if (userType.toLowerCase().includes("users")) {
       roleStr = "users";
     }
 
@@ -563,38 +627,67 @@ exports.getUserCertificates = async (req, res) => {
   try {
     const { userId } = req.params;
 
-    // ค้นหาประวัติที่สอบผ่าน (is_passed = true) โยงกับชื่อบทเรียน
-    const query = `
+    // Join เอาตาราง certificate_settings มาด้วยเลย
+    const certQuery = `
       SELECT 
-        c.id AS "chapterId", 
-        c.title AS "chapterTitle",
-        up.score, 
-        up.updated_at AS "passDate",
-        (SELECT COUNT(*) FROM questions q WHERE q.chapter_id = c.id) AS "totalQuestions"
-      FROM user_progress up
-      JOIN chapters c ON up.chapter_id = c.id
-      WHERE up.user_id = $1 AND up.is_passed = true
-      ORDER BY up.updated_at DESC
+        c.id as cert_id, c.course_group, c.issued_at,
+        cs.course_name, cs.signatory_name, cs.signatory_position,
+        cs.background_url, cs.logo_url, cs.signature_url
+      FROM certificates c
+      LEFT JOIN certificate_settings cs ON c.course_group = cs.course_group
+      WHERE c.user_id = $1 
+      ORDER BY c.issued_at DESC
     `;
+    const certResult = await db.query(certQuery, [userId]);
 
-    const result = await db.query(query, [userId]);
+    if (certResult.rows.length === 0) {
+      return res.status(200).json({ success: true, data: [] });
+    }
 
-    // Format วันที่ให้หน้าบ้าน
-    const formattedData = result.rows.map((row) => ({
-      ...row,
-      passDate: new Date(row.passDate).toLocaleDateString("th-TH", {
-        year: "numeric",
-        month: "long",
-        day: "numeric",
+    const certificates = await Promise.all(
+      certResult.rows.map(async (cert) => {
+        const targetGroup = cert.course_group;
+
+        const totalChaptersResult = await db.query(
+          `
+        SELECT COUNT(DISTINCT q.chapter_id) as total 
+        FROM questions q
+        JOIN chapters c ON q.chapter_id = c.id
+        WHERE c.target_group = $1
+      `,
+          [targetGroup],
+        );
+        const totalTestableChapters = parseInt(
+          totalChaptersResult.rows[0].total,
+        );
+
+        return {
+          certId: cert.cert_id,
+          course_name: cert.course_name || "AI Ethics Management",
+          signatory_name: cert.signatory_name,
+          signatory_position: cert.signatory_position,
+          background_url: cert.background_url,
+          logo_url: cert.logo_url,
+          signature_url: cert.signature_url,
+          passDate: new Date(cert.issued_at).toLocaleDateString("th-TH", {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          }),
+          score: totalTestableChapters,
+          totalQuestions: totalTestableChapters,
+        };
       }),
-    }));
+    );
 
-    res.status(200).json({ success: true, data: formattedData });
+    res.status(200).json({ success: true, data: certificates });
   } catch (error) {
     console.error("Get Certificates Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "เกิดข้อผิดพลาดในการดึงใบประกาศนียบัตร",
-    });
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "เกิดข้อผิดพลาดในการดึงใบประกาศนียบัตร",
+      });
   }
 };
