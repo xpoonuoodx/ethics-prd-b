@@ -1,7 +1,10 @@
 const express = require("express");
 const adminControllers = require("../controllers/adminControllers");
-const { verifyToken } = require("../middlewares/authMiddlewares");
+const { verifyToken, requireRole } = require("../middlewares/authMiddlewares");
 const router = express.Router();
+
+// ทุก route ในไฟล์นี้ต้องเป็น role admin เท่านั้น
+router.use(verifyToken, requireRole("admin"));
 
 router.get("/dashboard", verifyToken, adminControllers.getDashboard);
 

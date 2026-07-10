@@ -112,7 +112,7 @@ exports.register = async (req, res) => {
   const { id_card, first_name, last_name, phone, email, username, password } =
     req.body;
 
-  const client = await db.connect(); // ใช้ client เพื่อทำ Transaction
+  const client = await db.getClient(); // ใช้ client เพื่อทำ Transaction
 
   try {
     await client.query("BEGIN"); // เริ่ม Transaction
@@ -289,42 +289,45 @@ exports.forgotPassword = async (req, res) => {
 exports.resetPassword = async (req, res) => {
   const { token, newPassword } = req.body;
 
+  const client = await db.getClient(); // ใช้ client เดียวกันตลอด transaction
+
   try {
+    await client.query("BEGIN");
+
     // หา user_id จากตาราง profiles ด้วย token
-    const result = await db.query(
+    const result = await client.query(
       "SELECT user_id FROM profiles WHERE reset_token = $1",
       [token],
     );
 
     if (result.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ message: "Token ไม่ถูกต้องหรือหมดอายุ" });
     }
 
     const userId = result.rows[0].user_id;
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    await db.query("BEGIN");
-
     // 1. อัปเดตรหัสผ่านใหม่ในตาราง users
-    await db.query("UPDATE users SET password = $1 WHERE id = $2", [
+    await client.query("UPDATE users SET password = $1 WHERE id = $2", [
       hashedPassword,
       userId,
     ]);
 
     // 2. เคลียร์ reset_token ในตาราง profiles
-    await db.query(
+    await client.query(
       "UPDATE profiles SET reset_token = NULL WHERE reset_token = $1",
       [token],
     );
 
-    await db.query("COMMIT");
+    await client.query("COMMIT");
 
     res.json({ message: "เปลี่ยนรหัสผ่านสำเร็จ" });
   } catch (error) {
-    await db.query("ROLLBACK");
+    await client.query("ROLLBACK");
     console.error("Reset Password Error:", error);
     res.status(500).json({ message: "ไม่สามารถเปลี่ยนรหัสผ่านได้" });
   } finally {
-    db.release();
+    client.release();
   }
 };

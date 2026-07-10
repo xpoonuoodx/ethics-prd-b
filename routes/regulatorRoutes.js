@@ -1,7 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const regulatorControllers = require("../controllers/regulatorControllers");
-const { verifyToken } = require("../middlewares/authMiddlewares"); // ปรับ path ให้ตรงกับ middleware ของคุณ
+const { verifyToken, requireRole } = require("../middlewares/authMiddlewares"); // ปรับ path ให้ตรงกับ middleware ของคุณ
+
+// ทุก route ในไฟล์นี้ต้องเป็น role regulator เท่านั้น
+router.use(verifyToken, requireRole("regulator"));
 
 // เส้นทางสำหรับดึงข้อมูล Dashboard ของ Regulator
 router.get("/dashboard", verifyToken, regulatorControllers.getDashboard);

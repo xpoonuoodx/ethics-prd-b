@@ -60,4 +60,16 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-module.exports = { verifyToken };
+// ต้องใช้ต่อจาก verifyToken เสมอ (พึ่ง req.user ที่ verifyToken ใส่ไว้ให้)
+const requireRole = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res
+        .status(403)
+        .json({ message: "Access Denied. Insufficient permissions." });
+    }
+    next();
+  };
+};
+
+module.exports = { verifyToken, requireRole };
