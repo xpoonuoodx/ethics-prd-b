@@ -113,6 +113,19 @@ exports.addOrganization = async (req, res) => {
   const { id, name, regulatorName, status } = req.body;
 
   try {
+    // ตรวจสอบก่อนว่ารหัสหน่วยงานนี้ถูกใช้ไปแล้วหรือยัง กันบันทึกซ้ำ
+    const checkOrgCode = await db.query(
+      "SELECT id FROM organizations WHERE org_code = $1",
+      [id],
+    );
+
+    if (checkOrgCode.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "บันทึกไม่ได้ รหัสหน่วยงานนี้ถูกใช้งานแล้ว กรุณาใช้รหัสอื่น",
+      });
+    }
+
     // บันทึกเฉพาะโครงสร้างหน่วยงานไปก่อน ตามลำดับการทำงาน (สร้างบ้านก่อนเอาคนเข้าอยู่)
     await db.query(
       "INSERT INTO organizations (org_code, org_name, status) VALUES ($1, $2, $3)",
@@ -328,6 +341,145 @@ exports.addUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "เกิดข้อผิดพลาดในการบันทึกบัญชีลงฐานข้อมูล",
+    });
+  }
+};
+
+// ดึงรายชื่อผู้กำกับดูแล (role = regulator) ที่ยังไม่สังกัดหน่วยงานใดๆ สำหรับเลือกเพิ่มเข้าหน่วยงาน
+exports.getUnassignedRegulators = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        u.id,
+        u.username,
+        p.first_name_th || ' ' || p.last_name_th AS name,
+        p.email
+      FROM users u
+      LEFT JOIN profiles p ON u.id = p.user_id
+      WHERE u.role = 'regulator' AND u.organization_id IS NULL
+      ORDER BY u.created_at DESC
+    `);
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Unassigned Regulators Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "ดึงข้อมูลผู้กำกับดูแลที่ยังไม่สังกัดหน่วยงานผิดพลาด",
+    });
+  }
+};
+
+// เพิ่มผู้กำกับดูแล (role = regulator, ยังไม่มีหน่วยงาน) เข้าสังกัดหน่วยงานนี้
+exports.assignRegulatorToOrganization = async (req, res) => {
+  const { id } = req.params;
+  const { user_id } = req.body;
+
+  if (!user_id) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณาเลือกผู้กำกับดูแล" });
+  }
+
+  try {
+    // รองรับ id เป็นได้ทั้ง org_code หรือ ตัวเลข id จริง (เหมือน viewOrganization)
+    const orgResult = await db.query(
+      "SELECT id FROM organizations WHERE org_code = $1 OR id::text = $1",
+      [id],
+    );
+
+    if (orgResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลหน่วยงานนี้ในระบบ" });
+    }
+
+    const orgId = orgResult.rows[0].id;
+
+    // เช็คซ้ำฝั่ง server เสมอ: ต้องเป็น role='regulator' และยังไม่มีหน่วยงานเท่านั้น
+    const updateResult = await db.query(
+      `
+      UPDATE users
+      SET organization_id = $1
+      WHERE id = $2 AND role = 'regulator' AND organization_id IS NULL
+      RETURNING id
+      `,
+      [orgId, user_id],
+    );
+
+    if (updateResult.rowCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ผู้กำกับดูแลคนนี้ไม่สามารถเพิ่มได้ (อาจมีหน่วยงานอยู่แล้ว)",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "เพิ่มผู้กำกับดูแลเข้าหน่วยงานสำเร็จ",
+    });
+  } catch (error) {
+    console.error("Assign Regulator To Organization Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการเพิ่มผู้กำกับดูแลเข้าหน่วยงาน",
+    });
+  }
+};
+
+// ถอดผู้กำกับดูแล (role = regulator) ออกจากหน่วยงานนี้ (ไม่ได้ลบบัญชี แค่เอาออกจากสังกัด)
+exports.removeRegulatorFromOrganization = async (req, res) => {
+  const { id } = req.params;
+  const { user_id } = req.body;
+
+  if (!user_id) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณาระบุผู้กำกับดูแลที่ต้องการถอดออก" });
+  }
+
+  try {
+    // รองรับ id เป็นได้ทั้ง org_code หรือ ตัวเลข id จริง (เหมือน viewOrganization)
+    const orgResult = await db.query(
+      "SELECT id FROM organizations WHERE org_code = $1 OR id::text = $1",
+      [id],
+    );
+
+    if (orgResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลหน่วยงานนี้ในระบบ" });
+    }
+
+    const orgId = orgResult.rows[0].id;
+
+    // เช็คซ้ำฝั่ง server: ต้องเป็น role='regulator' และสังกัดหน่วยงานนี้อยู่จริงเท่านั้น
+    const updateResult = await db.query(
+      `
+      UPDATE users
+      SET organization_id = NULL
+      WHERE id = $1 AND role = 'regulator' AND organization_id = $2
+      RETURNING id
+      `,
+      [user_id, orgId],
+    );
+
+    if (updateResult.rowCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ไม่พบผู้กำกับดูแลคนนี้ในหน่วยงานนี้",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "ถอดผู้กำกับดูแลออกจากหน่วยงานสำเร็จ",
+    });
+  } catch (error) {
+    console.error("Remove Regulator From Organization Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการถอดผู้กำกับดูแลออกจากหน่วยงาน",
     });
   }
 };

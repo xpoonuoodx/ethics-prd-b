@@ -480,6 +480,102 @@ exports.assignUserToProject = async (req, res) => {
   }
 };
 
+// 8a. แก้ไขชื่อโครงการ
+exports.editProject = async (req, res) => {
+  const { id } = req.params;
+  const { project_name } = req.body;
+
+  if (!project_name || project_name.trim() === "") {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณาระบุชื่อโครงการ" });
+  }
+
+  try {
+    const userId = req.user.account_id || req.user.id;
+    const orgQuery = await db.query(
+      "SELECT organization_id FROM users WHERE id = $1",
+      [userId],
+    );
+    const orgId = orgQuery.rows[0].organization_id;
+
+    const checkProject = await db.query(
+      "SELECT organization_id FROM projects WHERE id = $1",
+      [id],
+    );
+    if (
+      checkProject.rows.length === 0 ||
+      checkProject.rows[0].organization_id !== orgId
+    ) {
+      return res
+        .status(403)
+        .json({ success: false, message: "ไม่มีสิทธิ์แก้ไขโครงการนี้" });
+    }
+
+    await db.query("UPDATE projects SET project_name = $1 WHERE id = $2", [
+      project_name.trim(),
+      id,
+    ]);
+
+    res.json({ success: true, message: "แก้ไขชื่อโครงการสำเร็จ" });
+  } catch (error) {
+    console.error("Edit Project Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการแก้ไขโครงการ" });
+  }
+};
+
+// 8b. ถอดบุคลากรออกจากโครงการ
+exports.removeProjectMember = async (req, res) => {
+  const { id } = req.params; // project id
+  const { user_id } = req.body;
+
+  if (!user_id) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณาระบุบุคลากรที่ต้องการถอดออก" });
+  }
+
+  try {
+    const currentUserId = req.user.account_id || req.user.id;
+    const orgQuery = await db.query(
+      "SELECT organization_id FROM users WHERE id = $1",
+      [currentUserId],
+    );
+    const orgId = orgQuery.rows[0].organization_id;
+
+    const checkProject = await db.query(
+      "SELECT id FROM projects WHERE id = $1 AND organization_id = $2",
+      [id, orgId],
+    );
+    if (checkProject.rows.length === 0) {
+      return res
+        .status(403)
+        .json({ success: false, message: "ไม่มีสิทธิ์จัดการโครงการนี้" });
+    }
+
+    const deleteResult = await db.query(
+      "DELETE FROM project_members WHERE project_id = $1 AND user_id = $2 RETURNING project_id",
+      [id, user_id],
+    );
+
+    if (deleteResult.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบบุคลากรท่านนี้ในโครงการนี้",
+      });
+    }
+
+    res.json({ success: true, message: "ถอดบุคลากรออกจากโครงการสำเร็จ" });
+  } catch (error) {
+    console.error("Remove Project Member Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการถอดบุคลากร" });
+  }
+};
+
 // 9. ดึงข้อมูลรายละเอียดโครงการและบุคลากรภายในโครงการ
 exports.viewProject = async (req, res) => {
   const { id } = req.params;

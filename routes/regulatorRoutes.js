@@ -30,5 +30,15 @@ router.post(
 );
 
 router.get("/view-project/:id", verifyToken, regulatorControllers.viewProject);
+router.put(
+  "/edit-project/:id",
+  verifyToken,
+  regulatorControllers.editProject,
+);
+router.post(
+  "/remove-project-member/:id",
+  verifyToken,
+  regulatorControllers.removeProjectMember,
+);
 
 module.exports = router;

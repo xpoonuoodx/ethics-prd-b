@@ -26,6 +26,22 @@ router.get(
   adminControllers.viewOrganization,
 );
 
+router.get(
+  "/get-unassigned-regulators",
+  verifyToken,
+  adminControllers.getUnassignedRegulators,
+);
+router.post(
+  "/assign-regulator-to-org/:id",
+  verifyToken,
+  adminControllers.assignRegulatorToOrganization,
+);
+router.post(
+  "/remove-regulator-from-org/:id",
+  verifyToken,
+  adminControllers.removeRegulatorFromOrganization,
+);
+
 router.get("/get-principles", verifyToken, adminControllers.getPrinciples);
 router.post("/add-principle", verifyToken, adminControllers.addPrinciple);
 router.put(
