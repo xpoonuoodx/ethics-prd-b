@@ -4,6 +4,7 @@ const db = require("../db"); // เชื่อมต่อกับ Neon (pg po
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const { google } = require("googleapis");
+const { isValidUsername, isValidPassword } = require("../utils/validators");
 
 // --- ตั้งค่า OAuth2 สำหรับ Gmail ---
 const oAuth2Client = new google.auth.OAuth2(
@@ -108,9 +109,46 @@ exports.login = async (req, res) => {
 };
 
 // --- 2. REGISTER ---
+const VALID_USER_TYPES = [
+  "regulator",
+  "policy",
+  "researcher",
+  "developer",
+  "service provider",
+  "users",
+];
+
 exports.register = async (req, res) => {
-  const { id_card, first_name, last_name, phone, email, username, password } =
-    req.body;
+  const {
+    account_type, // "organization" | "individual"
+    id_card,
+    first_name,
+    last_name,
+    email,
+    username,
+    password,
+    user_type,
+    org_name,
+  } = req.body;
+
+  const isOrganization = account_type === "organization";
+
+  if (!isValidUsername(username)) {
+    return res.status(400).json({
+      message: "ชื่อผู้ใช้งานต้องเป็นภาษาอังกฤษ ตัวเลข หรือ . _ - เท่านั้น (ห้ามใช้ภาษาไทย)",
+    });
+  }
+  if (!isValidPassword(password)) {
+    return res
+      .status(400)
+      .json({ message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)" });
+  }
+  if (!VALID_USER_TYPES.includes(user_type)) {
+    return res.status(400).json({ message: "กรุณาเลือกประเภทผู้ใช้งานให้ถูกต้อง" });
+  }
+  if (isOrganization && (!org_name || org_name.trim() === "")) {
+    return res.status(400).json({ message: "กรุณาระบุชื่อหน่วยงาน" });
+  }
 
   const client = await db.getClient(); // ใช้ client เพื่อทำ Transaction
 
@@ -147,14 +185,30 @@ exports.register = async (req, res) => {
       }
     }
 
+    // สมัครในฐานะหน่วยงาน: สร้างหน่วยงานใหม่ก่อน แล้วผูก user เป็น role = regulator
+    let organizationId = null;
+    if (isOrganization) {
+      const date = new Date();
+      const yy = String(date.getFullYear()).slice(-2);
+      const mm = String(date.getMonth() + 1).padStart(2, "0");
+      const orgCode = `ORG-${yy}${mm}-${crypto.randomBytes(3).toString("hex")}`;
+
+      const insertOrg = await client.query(
+        `INSERT INTO organizations (org_code, org_name, status) VALUES ($1, $2, 'Active') RETURNING id`,
+        [orgCode, org_name.trim()],
+      );
+      organizationId = insertOrg.rows[0].id;
+    }
+
+    const finalRole = isOrganization ? "regulator" : "user";
     const hashedPassword = await bcrypt.hash(password, 10);
     const verificationToken = crypto.randomBytes(32).toString("hex");
 
     // 1. บันทึกลงตาราง users และดึง id กลับมา
     const userInsertResult = await client.query(
-      `INSERT INTO users (username, password, role) 
-       VALUES ($1, $2, $3) RETURNING id`,
-      [username, hashedPassword, "user"],
+      `INSERT INTO users (username, password, role, organization_id, user_type)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [username, hashedPassword, finalRole, organizationId, user_type],
     );
     const newUserId = userInsertResult.rows[0].id;
 
@@ -167,15 +221,14 @@ exports.register = async (req, res) => {
 
     // 2. บันทึกลงตาราง profiles
     await client.query(
-      `INSERT INTO profiles 
-       (user_id, user_code, first_name_th, last_name_th, mobile, email, id_card, verification_token, is_verified) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO profiles
+       (user_id, user_code, first_name_th, last_name_th, email, id_card, verification_token, is_verified)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         newUserId,
         userCode,
         first_name,
         last_name,
-        phone,
         email,
         id_card,
         verificationToken,
@@ -189,7 +242,7 @@ exports.register = async (req, res) => {
     const verificationUrl = `${process.env.MYAPP_BACKEND_URL}/auth/verify-email?token=${verificationToken}`;
     const html = `
       <div style="font-family: 'Kanit', sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 15px; max-width: 600px;">
-        <h2 style="color: #2d6a4f; text-align: center;">ยินดีต้อนรับสู่ระบบ Ethic AI System+</h2>
+        <h2 style="color: #2d6a4f; text-align: center;">ยินดีต้อนรับสู่ระบบ Ethic AI System</h2>
         <p>คุณได้ทำการลงทะเบียนสำเร็จแล้ว รหัสผู้ใช้งานของคุณคือ <b>${userCode}</b></p>
         <p>เพื่อความปลอดภัยและเปิดใช้งานบัญชีของคุณ กรุณาคลิกปุ่มด้านล่าง:</p>
         <div style="text-align: center; margin: 30px 0;">
@@ -197,7 +250,7 @@ exports.register = async (req, res) => {
         </div>
         <p style="color: #7f8c8d; font-size: 13px;">หากคุณไม่ได้ทำการสมัครสมาชิก กรุณาเพิกเฉยต่ออีเมลฉบับนี้</p>
         <hr style="border: 0; border-top: 1px solid #eee;">
-        <p style="text-align: center; font-size: 12px; color: #bdc3c7;">© 2026 GAP+ System | DOAE</p>
+        <p style="text-align: center; font-size: 12px; color: #bdc3c7;">© 2026 Ethic AI System</p>
       </div>
     `;
 

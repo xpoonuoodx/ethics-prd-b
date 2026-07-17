@@ -66,6 +66,17 @@ router.put(
   adminControllers.updateMaturityLevel,
 );
 
+router.get(
+  "/get-impact-levels",
+  verifyToken,
+  adminControllers.getImpactLevels,
+);
+router.put(
+  "/update-impact-level/:id",
+  verifyToken,
+  adminControllers.updateImpactLevel,
+);
+
 router.get("/get-components", verifyToken, adminControllers.getComponents);
 router.post("/add-component", verifyToken, adminControllers.addComponent);
 router.put(

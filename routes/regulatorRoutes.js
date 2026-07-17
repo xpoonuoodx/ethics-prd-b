@@ -41,4 +41,58 @@ router.post(
   regulatorControllers.removeProjectMember,
 );
 
+// เส้นทางสื่อการเรียนรู้และแบบประเมิน สำหรับ Regulator (แยกจาก /user/* เป็นของตัวเอง)
+router.get(
+  "/classroom/:id",
+  verifyToken,
+  regulatorControllers.getRegulatorClassroom,
+);
+router.get(
+  "/chapter/:id",
+  verifyToken,
+  regulatorControllers.getRegulatorChapterById,
+);
+router.get(
+  "/tests/:id",
+  verifyToken,
+  regulatorControllers.getRegulatorTestsList,
+);
+router.get(
+  "/test-questions/:chapterId",
+  verifyToken,
+  regulatorControllers.getRegulatorTestQuestions,
+);
+router.post(
+  "/test-submit",
+  verifyToken,
+  regulatorControllers.submitRegulatorTestResult,
+);
+
+router.get(
+  "/tool-setup",
+  verifyToken,
+  regulatorControllers.getRegulatorToolSetupData,
+);
+router.post(
+  "/generate-tool",
+  verifyToken,
+  regulatorControllers.generateRegulatorToolResult,
+);
+router.get(
+  "/tool-history-list/:id",
+  verifyToken,
+  regulatorControllers.getRegulatorToolsHistoryList,
+);
+router.delete(
+  "/tool-history-delete/:id",
+  verifyToken,
+  regulatorControllers.deleteRegulatorToolHistory,
+);
+
+router.get(
+  "/certificates/:userId",
+  verifyToken,
+  regulatorControllers.getRegulatorCertificates,
+);
+
 module.exports = router;

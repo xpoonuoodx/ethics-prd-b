@@ -1,5 +1,6 @@
 const db = require("../db");
 const bcrypt = require("bcryptjs");
+const { isValidUsername, isValidPassword } = require("../utils/validators");
 
 // 1. ดึงข้อมูลหน้า Dashboard (ภาพรวม)
 exports.getDashboard = async (req, res) => {
@@ -265,6 +266,19 @@ exports.deleteUser = async (req, res) => {
 exports.addUser = async (req, res) => {
   // รับข้อมูลเพิ่มเติม email และ id_card จากหน้าบ้าน
   const { username, password, name, email, id_card, role, org_id } = req.body;
+
+  if (!isValidUsername(username)) {
+    return res.status(400).json({
+      success: false,
+      message: "ชื่อผู้ใช้งานต้องเป็นภาษาอังกฤษ ตัวเลข หรือ . _ - เท่านั้น (ห้ามใช้ภาษาไทย)",
+    });
+  }
+  if (!isValidPassword(password)) {
+    return res.status(400).json({
+      success: false,
+      message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)",
+    });
+  }
 
   try {
     // เริ่มต้น Transaction ผ่านตัว db.query ตรงๆ ตามที่ต้องการ
@@ -842,6 +856,66 @@ exports.updateMaturityLevel = async (req, res) => {
     res.json({ success: true, message: "อัปเดตเกณฑ์ระดับความพร้อมสำเร็จ" });
   } catch (error) {
     console.error("Update Maturity Level Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
+// ==========================================
+// Impact Levels (ใช้แทน Maturity สำหรับ role=user ที่ไม่มีหน่วยงานสังกัด)
+// ==========================================
+exports.getImpactLevels = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        il.level_id, il.level_name, il.description, il.is_active,
+        il.base_maturity_level,
+        ml.level_name AS base_maturity_name
+      FROM impact_levels il
+      LEFT JOIN maturity_levels ml ON il.base_maturity_level = ml.level_id
+      ORDER BY il.level_id ASC
+    `);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Impact Levels Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลระดับผลกระทบ",
+    });
+  }
+};
+
+exports.updateImpactLevel = async (req, res) => {
+  const { id } = req.params;
+  const { level_name, description, base_maturity_level, is_active } =
+    req.body;
+
+  if (!level_name || base_maturity_level === undefined) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณาระบุชื่อระดับผลกระทบและ Maturity Level ที่ใช้อ้างอิง",
+    });
+  }
+
+  try {
+    const updateQuery = await db.query(
+      `UPDATE impact_levels
+       SET level_name = $1, description = $2, base_maturity_level = $3, is_active = $4
+       WHERE level_id = $5 RETURNING level_id`,
+      [level_name, description, base_maturity_level, is_active, id],
+    );
+
+    if (updateQuery.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบข้อมูลระดับผลกระทบที่ต้องการแก้ไข",
+      });
+    }
+
+    res.json({ success: true, message: "อัปเดตเกณฑ์ระดับผลกระทบสำเร็จ" });
+  } catch (error) {
+    console.error("Update Impact Level Error:", error);
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
