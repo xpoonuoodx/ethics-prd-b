@@ -95,4 +95,16 @@ router.get(
   regulatorControllers.getRegulatorCertificates,
 );
 
+// ข้อมูลหน่วยงานของตัวเอง (หน้า "ข้อมูลหน่วยงาน" ใน Sidebar)
+router.get(
+  "/organization-info",
+  verifyToken,
+  regulatorControllers.getOrganizationInfo,
+);
+router.put(
+  "/organization-info",
+  verifyToken,
+  regulatorControllers.editOrganizationInfo,
+);
+
 module.exports = router;

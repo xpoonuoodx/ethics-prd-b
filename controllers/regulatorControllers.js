@@ -20,34 +20,42 @@ exports.getDashboard = async (req, res) => {
     const orgId = userQuery.rows[0].organization_id;
     const orgName = userQuery.rows[0].org_name;
 
-    const totalProjectsRes = await db.query(
-      "SELECT COUNT(*) FROM projects WHERE organization_id = $1",
-      [orgId],
-    );
     const totalUsersRes = await db.query(
       "SELECT COUNT(*) FROM users WHERE organization_id = $1 AND role != 'admin'",
       [orgId],
     );
-    const pendingProjectsRes = await db.query(
-      "SELECT COUNT(*) FROM projects WHERE organization_id = $1 AND status = 'Pending'",
-      [orgId],
-    );
-    const activeProjectsRes = await db.query(
-      "SELECT COUNT(*) FROM projects WHERE organization_id = $1 AND status != 'Pending'",
+
+    // สถานะโครงการคำนวณสดจาก "สมาชิกในโครงการทำแบบประเมินตนเองครบทุกคนหรือยัง"
+    // ไม่ได้อ่านจากคอลัมน์ status ที่ถูกตั้งค่าตายตัวตอนสร้างโครงการ (ดู addProject)
+    const projectsStatusRes = await db.query(
+      `SELECT
+        p.id,
+        (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id) as total_members,
+        (SELECT COUNT(*) FROM project_members pm
+           WHERE pm.project_id = p.id
+           AND EXISTS (SELECT 1 FROM user_tools_history uth WHERE uth.user_id = pm.user_id)
+        ) as completed_members
+       FROM projects p
+       WHERE p.organization_id = $1`,
       [orgId],
     );
 
-    const chartRes = await db.query(
-      `SELECT status as name, COUNT(*) as projects FROM projects WHERE organization_id = $1 GROUP BY status`,
-      [orgId],
-    );
-    const chartData = chartRes.rows.map((row) => {
-      let color = "#10b981";
-      if (row.name === "Pending") color = "#f59e0b";
-      if (row.name === "High Risk" || row.name === "Rejected")
-        color = "#ef4444";
-      return { name: row.name, projects: parseInt(row.projects), color };
+    let pendingCount = 0;
+    let inProgressCount = 0;
+    let completedCount = 0;
+    projectsStatusRes.rows.forEach((row) => {
+      const total = parseInt(row.total_members) || 0;
+      const completed = parseInt(row.completed_members) || 0;
+      if (total > 0 && completed === total) completedCount++;
+      else if (completed > 0) inProgressCount++;
+      else pendingCount++;
     });
+
+    const chartData = [
+      { name: "Pending", projects: pendingCount, color: "#f59e0b" },
+      { name: "In Progress", projects: inProgressCount, color: "#3b82f6" },
+      { name: "Completed", projects: completedCount, color: "#10b981" },
+    ].filter((c) => c.projects > 0);
 
     const usersRes = await db.query(
       `
@@ -60,26 +68,66 @@ exports.getDashboard = async (req, res) => {
 
     const projectsRes = await db.query(
       `
-      SELECT p.id, p.project_name, p.status, p.created_at, p.progress, pr.first_name_th || ' ' || pr.last_name_th AS manager
+      SELECT
+        p.id, p.project_name, p.created_at, p.progress,
+        pr.first_name_th || ' ' || pr.last_name_th AS manager,
+        (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id) as total_members,
+        (SELECT COUNT(*) FROM project_members pm
+           WHERE pm.project_id = p.id
+           AND EXISTS (SELECT 1 FROM user_tools_history uth WHERE uth.user_id = pm.user_id)
+        ) as completed_members
       FROM projects p LEFT JOIN users u ON p.created_by = u.id LEFT JOIN profiles pr ON u.id = pr.user_id
       WHERE p.organization_id = $1 ORDER BY p.created_at DESC LIMIT 5
     `,
       [orgId],
     );
+    const recentProjects = projectsRes.rows.map((row) => {
+      const total = parseInt(row.total_members) || 0;
+      const completed = parseInt(row.completed_members) || 0;
+      let status = "Pending";
+      if (total > 0 && completed === total) status = "Completed";
+      else if (completed > 0) status = "In Progress";
+      return { ...row, status, total_members: total, completed_members: completed };
+    });
+
+    // คะแนนประเมินจริยธรรม AI เฉลี่ยรายหลักการ คำนวณจากผลประเมินตนเอง (user_tools_history)
+    // ของ "บุคลากรในหน่วยงานนี้เท่านั้น" (กรองด้วย organization_id ของ regulator ที่ login อยู่)
+    const radarRes = await db.query(
+      `
+      SELECT
+        p->>'id' as principle_id,
+        p->>'name' as principle_name,
+        AVG((uth.maturity_id::float / max_level.max_id) * 100) as avg_score
+      FROM user_tools_history uth
+      JOIN users u ON uth.user_id = u.id
+      CROSS JOIN LATERAL jsonb_array_elements(uth.result_data->'principles') AS p
+      CROSS JOIN (SELECT MAX(level_id) as max_id FROM maturity_levels WHERE is_active = true) max_level
+      WHERE u.organization_id = $1
+      GROUP BY p->>'id', p->>'name'
+      ORDER BY p->>'id' ASC
+    `,
+      [orgId],
+    );
+    const ethicsRadar = radarRes.rows.map((row) => ({
+      subject: row.principle_name,
+      score: Math.round(parseFloat(row.avg_score)),
+      fullMark: 100,
+    }));
 
     res.json({
       success: true,
       data: {
         orgName: orgName,
         stats: {
-          totalProjects: parseInt(totalProjectsRes.rows[0].count) || 0,
+          totalProjects: projectsStatusRes.rows.length,
           totalUsers: parseInt(totalUsersRes.rows[0].count) || 0,
-          pendingProjects: parseInt(pendingProjectsRes.rows[0].count) || 0,
-          activeProjects: parseInt(activeProjectsRes.rows[0].count) || 0,
+          pendingProjects: pendingCount,
+          activeProjects: inProgressCount,
         },
         chartData: chartData,
+        ethicsRadar: ethicsRadar,
         recentUsers: usersRes.rows,
-        recentProjects: projectsRes.rows,
+        recentProjects: recentProjects,
       },
     });
   } catch (error) {
@@ -350,14 +398,17 @@ exports.getProjects = async (req, res) => {
 
     const result = await db.query(
       `
-      SELECT 
-        p.id, 
-        p.project_code, 
-        p.project_name, 
-        p.progress, 
-        p.status, 
+      SELECT
+        p.id,
+        p.project_code,
+        p.project_name,
+        p.progress,
         p.created_at,
         (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id) as total_members,
+        (SELECT COUNT(*) FROM project_members pm
+           WHERE pm.project_id = p.id
+           AND EXISTS (SELECT 1 FROM user_tools_history uth WHERE uth.user_id = pm.user_id)
+        ) as completed_members,
         pr.first_name_th || ' ' || pr.last_name_th AS manager
       FROM projects p
       LEFT JOIN users u ON p.created_by = u.id
@@ -368,7 +419,22 @@ exports.getProjects = async (req, res) => {
       [orgId],
     );
 
-    res.json({ success: true, data: result.rows });
+    // สถานะโครงการคำนวณสดจากจำนวนสมาชิกที่ทำแบบประเมินตนเองแล้วเทียบกับสมาชิกทั้งหมด
+    const projects = result.rows.map((row) => {
+      const total = parseInt(row.total_members) || 0;
+      const completed = parseInt(row.completed_members) || 0;
+      let status = "Pending";
+      if (total > 0 && completed === total) status = "Completed";
+      else if (completed > 0) status = "In Progress";
+      return {
+        ...row,
+        status,
+        total_members: total,
+        completed_members: completed,
+      };
+    });
+
+    res.json({ success: true, data: projects });
   } catch (error) {
     console.error("Get Projects Error:", error);
     res
@@ -603,8 +669,14 @@ exports.viewProject = async (req, res) => {
     const orgId = orgQuery.rows[0].organization_id;
 
     const projectResult = await db.query(
-      `SELECT id, project_code, project_name, progress, created_at 
-       FROM projects 
+      `SELECT
+         id, project_code, project_name, progress, created_at,
+         (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = projects.id) as total_members,
+         (SELECT COUNT(*) FROM project_members pm
+            WHERE pm.project_id = projects.id
+            AND EXISTS (SELECT 1 FROM user_tools_history uth WHERE uth.user_id = pm.user_id)
+         ) as completed_members
+       FROM projects
        WHERE id = $1 AND organization_id = $2`,
       [id, orgId],
     );
@@ -616,14 +688,31 @@ exports.viewProject = async (req, res) => {
       });
     }
 
-    const projectData = projectResult.rows[0];
+    const projectRow = projectResult.rows[0];
+    const totalMembers = parseInt(projectRow.total_members) || 0;
+    const completedMembers = parseInt(projectRow.completed_members) || 0;
+    let status = "Pending";
+    if (totalMembers > 0 && completedMembers === totalMembers)
+      status = "Completed";
+    else if (completedMembers > 0) status = "In Progress";
 
+    const projectData = {
+      ...projectRow,
+      status,
+      total_members: totalMembers,
+      completed_members: completedMembers,
+    };
+
+    // รายชื่อสมาชิก พร้อมสถานะว่าทำแบบประเมินตนเองแล้วหรือยัง (has_assessed)
     const membersResult = await db.query(
-      `SELECT 
-         u.id, 
-         u.username, 
+      `SELECT
+         u.id,
+         u.username,
          p.first_name_th || ' ' || p.last_name_th AS name,
-         p.email
+         p.email,
+         EXISTS (
+           SELECT 1 FROM user_tools_history uth WHERE uth.user_id = u.id
+         ) as has_assessed
        FROM project_members pm
        JOIN users u ON pm.user_id = u.id
        LEFT JOIN profiles p ON u.id = p.user_id
@@ -631,11 +720,35 @@ exports.viewProject = async (req, res) => {
       [id],
     );
 
+    // คะแนนประเมินจริยธรรม AI เฉลี่ยรายหลักการ เฉพาะ "สมาชิกในโครงการนี้เท่านั้น"
+    const radarRes = await db.query(
+      `
+      SELECT
+        pri->>'id' as principle_id,
+        pri->>'name' as principle_name,
+        AVG((uth.maturity_id::float / max_level.max_id) * 100) as avg_score
+      FROM user_tools_history uth
+      JOIN project_members pm ON pm.user_id = uth.user_id
+      CROSS JOIN LATERAL jsonb_array_elements(uth.result_data->'principles') AS pri
+      CROSS JOIN (SELECT MAX(level_id) as max_id FROM maturity_levels WHERE is_active = true) max_level
+      WHERE pm.project_id = $1
+      GROUP BY pri->>'id', pri->>'name'
+      ORDER BY pri->>'id' ASC
+    `,
+      [id],
+    );
+    const ethicsRadar = radarRes.rows.map((row) => ({
+      subject: row.principle_name,
+      score: Math.round(parseFloat(row.avg_score)),
+      fullMark: 100,
+    }));
+
     res.json({
       success: true,
       data: {
         project: projectData,
         members: membersResult.rows,
+        ethicsRadar,
       },
     });
   } catch (error) {
@@ -1234,6 +1347,130 @@ exports.getRegulatorCertificates = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "เกิดข้อผิดพลาดในการดึงใบประกาศนียบัตร",
+    });
+  }
+};
+
+// ==========================================
+// ข้อมูลหน่วยงานของตัวเอง (สำหรับหน้า "ข้อมูลหน่วยงาน" ใน Sidebar)
+// ==========================================
+
+// ดึงข้อมูลโปรไฟล์หน่วยงาน + สถิติ + รายชื่อผู้กำกับดูแลในหน่วยงาน
+exports.getOrganizationInfo = async (req, res) => {
+  try {
+    const userId = req.user.account_id || req.user.id;
+    const orgQuery = await db.query(
+      "SELECT organization_id FROM users WHERE id = $1",
+      [userId],
+    );
+    const orgId = orgQuery.rows[0]?.organization_id;
+
+    if (!orgId) {
+      return res.status(404).json({
+        success: false,
+        message: "บัญชีของคุณไม่มีหน่วยงานสังกัด",
+      });
+    }
+
+    const orgResult = await db.query(
+      `SELECT id, org_code, org_name, status, created_at
+       FROM organizations
+       WHERE id = $1`,
+      [orgId],
+    );
+
+    if (orgResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลหน่วยงานนี้ในระบบ" });
+    }
+
+    const statsResult = await db.query(
+      `SELECT
+        (SELECT COUNT(*) FROM users WHERE organization_id = $1) as total_users,
+        (SELECT COUNT(*) FROM users WHERE organization_id = $1 AND role = 'regulator') as total_regulators,
+        (SELECT COUNT(*) FROM users WHERE organization_id = $1 AND role = 'user') as total_members,
+        (SELECT COUNT(*) FROM projects WHERE organization_id = $1) as total_projects,
+        (SELECT COUNT(*) FROM certificates c
+           JOIN users u ON c.user_id = u.id
+           WHERE u.organization_id = $1) as total_certificates
+      `,
+      [orgId],
+    );
+
+    const regulatorsResult = await db.query(
+      `SELECT
+         u.id, u.username, u.created_at,
+         p.first_name_th || ' ' || p.last_name_th AS name,
+         p.email
+       FROM users u
+       LEFT JOIN profiles p ON u.id = p.user_id
+       WHERE u.organization_id = $1 AND u.role = 'regulator'
+       ORDER BY u.created_at ASC`,
+      [orgId],
+    );
+
+    const stats = statsResult.rows[0];
+
+    res.json({
+      success: true,
+      data: {
+        organization: orgResult.rows[0],
+        stats: {
+          totalUsers: parseInt(stats.total_users) || 0,
+          totalRegulators: parseInt(stats.total_regulators) || 0,
+          totalMembers: parseInt(stats.total_members) || 0,
+          totalProjects: parseInt(stats.total_projects) || 0,
+          totalCertificates: parseInt(stats.total_certificates) || 0,
+        },
+        regulators: regulatorsResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Get Regulator Organization Info Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลหน่วยงาน",
+    });
+  }
+};
+
+// แก้ไขชื่อหน่วยงานของตัวเอง (org_code / status ปรับได้เฉพาะฝั่ง Admin เท่านั้น)
+exports.editOrganizationInfo = async (req, res) => {
+  const { org_name } = req.body;
+
+  if (!org_name || org_name.trim() === "") {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณาระบุชื่อหน่วยงาน" });
+  }
+
+  try {
+    const userId = req.user.account_id || req.user.id;
+    const orgQuery = await db.query(
+      "SELECT organization_id FROM users WHERE id = $1",
+      [userId],
+    );
+    const orgId = orgQuery.rows[0]?.organization_id;
+
+    if (!orgId) {
+      return res.status(404).json({
+        success: false,
+        message: "บัญชีของคุณไม่มีหน่วยงานสังกัด",
+      });
+    }
+
+    await db.query(
+      "UPDATE organizations SET org_name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [org_name.trim(), orgId],
+    );
+
+    res.json({ success: true, message: "แก้ไขชื่อหน่วยงานสำเร็จ" });
+  } catch (error) {
+    console.error("Edit Regulator Organization Info Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการแก้ไขชื่อหน่วยงาน",
     });
   }
 };
