@@ -71,11 +71,12 @@ exports.login = async (req, res) => {
     const user = result.rows[0];
 
     // ตรวจสอบสถานะการยืนยันอีเมล
-    if (!user.is_verified) {
-      return res.status(403).json({
-        message: "บัญชีของคุณยังไม่ได้ยืนยันตัวตน กรุณาตรวจสอบอีเมลของคุณ",
-      });
-    }
+    // ปิดชั่วคราวเพื่อให้สมัครแล้วล็อกอินใช้งานได้ทันทีสำหรับรอบอบรม (TODO: เปิดกลับคืนหลังอบรมเสร็จ)
+    // if (!user.is_verified) {
+    //   return res.status(403).json({
+    //     message: "บัญชีของคุณยังไม่ได้ยืนยันตัวตน กรุณาตรวจสอบอีเมลของคุณ",
+    //   });
+    // }
 
     // ตรวจสอบรหัสผ่าน
     const isMatch = await bcrypt.compare(password, user.password);
