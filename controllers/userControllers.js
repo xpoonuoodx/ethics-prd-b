@@ -457,16 +457,45 @@ exports.submitTestResult = async (req, res) => {
 
 exports.getToolSetupData = async (req, res) => {
   try {
-    const maturities = await db.query(
-      "SELECT level_id, level_name, description FROM maturity_levels WHERE is_active = true ORDER BY level_id ASC",
+    // เช็คว่าผู้ใช้ที่ล็อกอินอยู่มีหน่วยงานสังกัดหรือไม่ (ดึงจาก JWT ที่ verify แล้วเท่านั้น)
+    const currentUserId = req.user.account_id || req.user.id;
+    const orgCheck = await db.query(
+      "SELECT organization_id FROM users WHERE id = $1",
+      [currentUserId],
     );
+    const hasOrganization =
+      orgCheck.rows.length > 0 && orgCheck.rows[0].organization_id !== null;
+
     const principles = await db.query(
       "SELECT id, name, description FROM principles ORDER BY id ASC",
     );
 
+    if (hasOrganization) {
+      // มีหน่วยงานสังกัด -> ใช้ Maturity Level เหมือนเดิม
+      const maturities = await db.query(
+        "SELECT level_id, level_name, description FROM maturity_levels WHERE is_active = true ORDER BY level_id ASC",
+      );
+      return res.status(200).json({
+        success: true,
+        data: {
+          levelType: "maturity",
+          maturities: maturities.rows,
+          principles: principles.rows,
+        },
+      });
+    }
+
+    // ไม่มีหน่วยงานสังกัด -> ใช้ Impact Level แทน
+    const impacts = await db.query(
+      "SELECT level_id, level_name, description FROM impact_levels WHERE is_active = true ORDER BY level_id ASC",
+    );
     res.status(200).json({
       success: true,
-      data: { maturities: maturities.rows, principles: principles.rows },
+      data: {
+        levelType: "impact",
+        maturities: impacts.rows,
+        principles: principles.rows,
+      },
     });
   } catch (error) {
     console.error("Get Tool Setup Error:", error);
@@ -483,15 +512,35 @@ exports.generateToolResult = async (req, res) => {
   try {
     const { userId, maturityId, principleIds } = req.body;
 
-    // 1. ดึงข้อมูล User Type
+    // 1. ดึงข้อมูล User Type + หน่วยงานสังกัด
     const userResult = await db.query(
-      "SELECT user_type FROM users WHERE id = $1",
+      "SELECT user_type, organization_id FROM users WHERE id = $1",
       [userId],
     );
     if (userResult.rows.length === 0) {
       return res.status(404).json({ success: false, message: "ไม่พบ User" });
     }
     const userType = userResult.rows[0].user_type || "user";
+    const hasOrganization = userResult.rows[0].organization_id !== null;
+
+    // ถ้าไม่มีหน่วยงานสังกัด: maturityId ที่ส่งมาคือ Impact Level ID
+    // ต้องแปลงเป็น Maturity Level (base_maturity_level) ก่อน เพื่อให้ query ที่เหลือทำงานเหมือนเดิมทุกจุด
+    let actualMaturityId = maturityId;
+    let impactInfo = null;
+
+    if (!hasOrganization) {
+      const impactResult = await db.query(
+        "SELECT level_id, level_name, description, base_maturity_level FROM impact_levels WHERE level_id = $1",
+        [maturityId],
+      );
+      if (impactResult.rows.length === 0) {
+        return res
+          .status(404)
+          .json({ success: false, message: "ไม่พบระดับผลกระทบนี้" });
+      }
+      impactInfo = impactResult.rows[0];
+      actualMaturityId = impactInfo.base_maturity_level;
+    }
 
     // 2. แปลง User Type เป็น Role สำหรับดึง Components
     let roleStr = "user";
@@ -525,12 +574,12 @@ exports.generateToolResult = async (req, res) => {
       FROM evaluation_guidelines 
       WHERE LOWER(user_type) = LOWER($1) AND level_id = $2
     `;
-    const guidelines = await db.query(guideQuery, [userType, maturityId]);
+    const guidelines = await db.query(guideQuery, [userType, actualMaturityId]);
 
     // 5. ดึงข้อมูลรายละเอียดของ Maturity และ Principles
     const matInfo = await db.query(
       "SELECT level_id, level_name, description FROM maturity_levels WHERE level_id = $1",
-      [maturityId],
+      [actualMaturityId],
     );
     const prinInfo = await db.query(
       "SELECT id, name, description FROM principles WHERE id = ANY($1::varchar[])",
@@ -543,12 +592,13 @@ exports.generateToolResult = async (req, res) => {
       matchedRole: roleStr,
       date: new Date().toLocaleDateString("th-TH"),
       maturity: matInfo.rows[0],
+      impact: impactInfo, // จะมีค่าเฉพาะกรณีไม่มีหน่วยงานสังกัด (ใช้ Impact Level แทน)
       principles: prinInfo.rows,
       components: components.rows,
       guideline: guidelines.rows.length > 0 ? guidelines.rows[0] : null,
     };
 
-    // 7. บันทึกลงตาราง ประวัติ user_tools_history ในรูปแบบ JSONB ถาวร
+    // 7. บันทึกลงตาราง ประวัติ user_tools_history ในรูปแบบ JSONB ถาวร (เก็บเป็น maturity_id จริงเสมอ เพื่อให้รายงาน/สถิติอื่นใช้ร่วมกันได้)
     const insertHistoryQuery = `
       INSERT INTO user_tools_history (user_id, maturity_id, result_data)
       VALUES ($1, $2, $3)
@@ -556,7 +606,7 @@ exports.generateToolResult = async (req, res) => {
     `;
     const historyResult = await db.query(insertHistoryQuery, [
       userId,
-      maturityId,
+      actualMaturityId,
       JSON.stringify(resultSnapshot),
     ]);
 
@@ -689,5 +739,28 @@ exports.getUserCertificates = async (req, res) => {
         success: false,
         message: "เกิดข้อผิดพลาดในการดึงใบประกาศนียบัตร",
       });
+  }
+};
+
+// ดึงรายการ Activities ของ Component หนึ่งๆ (ใช้แสดงในป็อปอัพหน้าผลการประเมิน)
+exports.getComponentActivitiesList = async (req, res) => {
+  const { componentId } = req.params;
+
+  try {
+    const activitiesResult = await db.query(
+      `SELECT id, activity_text, maturity_level
+       FROM component_activities
+       WHERE component_id = $1
+       ORDER BY maturity_level ASC, sort_order ASC, id ASC`,
+      [componentId],
+    );
+
+    res.json({ success: true, data: activitiesResult.rows });
+  } catch (error) {
+    console.error("Get Component Activities List Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูล Activities",
+    });
   }
 };

@@ -1,5 +1,6 @@
 const db = require("../db");
 const bcrypt = require("bcryptjs");
+const { isValidUsername, isValidPassword } = require("../utils/validators");
 
 // 1. ดึงข้อมูลหน้า Dashboard (ภาพรวม)
 exports.getDashboard = async (req, res) => {
@@ -265,6 +266,19 @@ exports.deleteUser = async (req, res) => {
 exports.addUser = async (req, res) => {
   // รับข้อมูลเพิ่มเติม email และ id_card จากหน้าบ้าน
   const { username, password, name, email, id_card, role, org_id } = req.body;
+
+  if (!isValidUsername(username)) {
+    return res.status(400).json({
+      success: false,
+      message: "ชื่อผู้ใช้งานต้องเป็นภาษาอังกฤษ ตัวเลข หรือ . _ - เท่านั้น (ห้ามใช้ภาษาไทย)",
+    });
+  }
+  if (!isValidPassword(password)) {
+    return res.status(400).json({
+      success: false,
+      message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)",
+    });
+  }
 
   try {
     // เริ่มต้น Transaction ผ่านตัว db.query ตรงๆ ตามที่ต้องการ
@@ -848,6 +862,66 @@ exports.updateMaturityLevel = async (req, res) => {
   }
 };
 
+// ==========================================
+// Impact Levels (ใช้แทน Maturity สำหรับ role=user ที่ไม่มีหน่วยงานสังกัด)
+// ==========================================
+exports.getImpactLevels = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        il.level_id, il.level_name, il.description, il.is_active,
+        il.base_maturity_level,
+        ml.level_name AS base_maturity_name
+      FROM impact_levels il
+      LEFT JOIN maturity_levels ml ON il.base_maturity_level = ml.level_id
+      ORDER BY il.level_id ASC
+    `);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Impact Levels Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลระดับผลกระทบ",
+    });
+  }
+};
+
+exports.updateImpactLevel = async (req, res) => {
+  const { id } = req.params;
+  const { level_name, description, base_maturity_level, is_active } =
+    req.body;
+
+  if (!level_name || base_maturity_level === undefined) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณาระบุชื่อระดับผลกระทบและ Maturity Level ที่ใช้อ้างอิง",
+    });
+  }
+
+  try {
+    const updateQuery = await db.query(
+      `UPDATE impact_levels
+       SET level_name = $1, description = $2, base_maturity_level = $3, is_active = $4
+       WHERE level_id = $5 RETURNING level_id`,
+      [level_name, description, base_maturity_level, is_active, id],
+    );
+
+    if (updateQuery.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบข้อมูลระดับผลกระทบที่ต้องการแก้ไข",
+      });
+    }
+
+    res.json({ success: true, message: "อัปเดตเกณฑ์ระดับผลกระทบสำเร็จ" });
+  } catch (error) {
+    console.error("Update Impact Level Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
 exports.getComponents = async (req, res) => {
   try {
     const result = await db.query(
@@ -963,6 +1037,156 @@ exports.deleteComponent = async (req, res) => {
           "ไม่สามารถลบได้ เนื่องจากหัวข้อนี้ถูกนำไปตั้งค่าความสัมพันธ์เกณฑ์จริยธรรม (Matrix) หรือคลังคำถามแล้ว",
       });
     }
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
+// ==========================================
+// Activities ของแต่ละ Component (ตาม Maturity Level)
+// ==========================================
+
+// ดึงรายการ Activities ของ Component หนึ่งๆ พร้อมข้อมูล Component เอง
+exports.getComponentActivities = async (req, res) => {
+  const { componentId } = req.params;
+
+  try {
+    const componentResult = await db.query(
+      "SELECT id, role, title, max_maturity_level FROM components WHERE id = $1",
+      [componentId],
+    );
+
+    if (componentResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบหัวข้อการประเมินนี้ในระบบ" });
+    }
+
+    const activitiesResult = await db.query(
+      `SELECT id, component_id, activity_text, maturity_level, sort_order
+       FROM component_activities
+       WHERE component_id = $1
+       ORDER BY maturity_level ASC, sort_order ASC, id ASC`,
+      [componentId],
+    );
+
+    res.json({
+      success: true,
+      data: {
+        component: componentResult.rows[0],
+        activities: activitiesResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Get Component Activities Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูล Activities",
+    });
+  }
+};
+
+// เพิ่ม Activity ใหม่ให้ Component
+exports.addComponentActivity = async (req, res) => {
+  const { component_id, activity_text, maturity_level, sort_order } =
+    req.body;
+
+  if (!component_id || !activity_text || maturity_level === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณากรอกข้อมูลให้ครบถ้วนทุกช่อง" });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO component_activities (component_id, activity_text, maturity_level, sort_order)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [
+        component_id,
+        activity_text.trim(),
+        parseInt(maturity_level),
+        parseInt(sort_order) || 0,
+      ],
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "เพิ่ม Activity สำเร็จ",
+      data: { id: result.rows[0].id },
+    });
+  } catch (error) {
+    console.error("Add Component Activity Error:", error);
+    if (error.code === "23503") {
+      return res.status(400).json({
+        success: false,
+        message: "ไม่พบหัวข้อการประเมินหรือระดับความพร้อมที่ระบุ",
+      });
+    }
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
+// แก้ไข Activity
+exports.updateComponentActivity = async (req, res) => {
+  const { id } = req.params;
+  const { activity_text, maturity_level, sort_order } = req.body;
+
+  if (!activity_text || maturity_level === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณากรอกข้อมูลให้ครบถ้วน" });
+  }
+
+  try {
+    const result = await db.query(
+      `UPDATE component_activities
+       SET activity_text = $1, maturity_level = $2, sort_order = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4 RETURNING id`,
+      [
+        activity_text.trim(),
+        parseInt(maturity_level),
+        parseInt(sort_order) || 0,
+        id,
+      ],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบ Activity ที่ต้องการแก้ไข" });
+    }
+
+    res.json({ success: true, message: "แก้ไข Activity สำเร็จ" });
+  } catch (error) {
+    console.error("Update Component Activity Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการแก้ไขข้อมูล" });
+  }
+};
+
+// ลบ Activity
+exports.deleteComponentActivity = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await db.query(
+      "DELETE FROM component_activities WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบ Activity ที่ต้องการลบ" });
+    }
+
+    res.json({ success: true, message: "ลบ Activity สำเร็จ" });
+  } catch (error) {
+    console.error("Delete Component Activity Error:", error);
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });

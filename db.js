@@ -20,6 +20,12 @@ const pool = new Pool({
   },
 });
 
+// สำคัญ: Neon จะตัด connection ที่ idle อยู่ทิ้งเองเป็นระยะ ถ้าไม่ดัก error ตรงนี้ไว้
+// Node จะมองว่าเป็น uncaught exception แล้วปิดโปรเซสทั้งตัวทันที (ทำให้ server ค้างไปเรื่อยๆ แล้วดับเอง)
+pool.on("error", (err) => {
+  console.error("⚠️  Unexpected error on idle Postgres client:", err.message);
+});
+
 // ทดสอบการเชื่อมต่อเมื่อเริ่มเซิร์ฟเวอร์
 pool.connect((err, client, release) => {
   if (err) {
