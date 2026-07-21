@@ -90,6 +90,28 @@ router.delete(
   adminControllers.deleteComponent,
 );
 
+// Activities ของแต่ละ Component (ตาม Maturity Level)
+router.get(
+  "/get-component-activities/:componentId",
+  verifyToken,
+  adminControllers.getComponentActivities,
+);
+router.post(
+  "/add-component-activity",
+  verifyToken,
+  adminControllers.addComponentActivity,
+);
+router.put(
+  "/update-component-activity/:id",
+  verifyToken,
+  adminControllers.updateComponentActivity,
+);
+router.delete(
+  "/delete-component-activity/:id",
+  verifyToken,
+  adminControllers.deleteComponentActivity,
+);
+
 router.get(
   "/get-mapping-matrix",
   verifyToken,

@@ -107,4 +107,10 @@ router.put(
   regulatorControllers.editOrganizationInfo,
 );
 
+router.get(
+  "/component-activities/:componentId",
+  verifyToken,
+  regulatorControllers.getRegulatorComponentActivities,
+);
+
 module.exports = router;

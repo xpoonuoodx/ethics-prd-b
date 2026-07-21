@@ -36,4 +36,10 @@ router.get(
   userControllers.getUserCertificates,
 );
 
+router.get(
+  "/component-activities/:componentId",
+  verifyToken,
+  userControllers.getComponentActivitiesList,
+);
+
 module.exports = router;

@@ -741,3 +741,26 @@ exports.getUserCertificates = async (req, res) => {
       });
   }
 };
+
+// ดึงรายการ Activities ของ Component หนึ่งๆ (ใช้แสดงในป็อปอัพหน้าผลการประเมิน)
+exports.getComponentActivitiesList = async (req, res) => {
+  const { componentId } = req.params;
+
+  try {
+    const activitiesResult = await db.query(
+      `SELECT id, activity_text, maturity_level
+       FROM component_activities
+       WHERE component_id = $1
+       ORDER BY maturity_level ASC, sort_order ASC, id ASC`,
+      [componentId],
+    );
+
+    res.json({ success: true, data: activitiesResult.rows });
+  } catch (error) {
+    console.error("Get Component Activities List Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูล Activities",
+    });
+  }
+};

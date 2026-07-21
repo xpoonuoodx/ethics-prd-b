@@ -1043,6 +1043,156 @@ exports.deleteComponent = async (req, res) => {
   }
 };
 
+// ==========================================
+// Activities ของแต่ละ Component (ตาม Maturity Level)
+// ==========================================
+
+// ดึงรายการ Activities ของ Component หนึ่งๆ พร้อมข้อมูล Component เอง
+exports.getComponentActivities = async (req, res) => {
+  const { componentId } = req.params;
+
+  try {
+    const componentResult = await db.query(
+      "SELECT id, role, title, max_maturity_level FROM components WHERE id = $1",
+      [componentId],
+    );
+
+    if (componentResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบหัวข้อการประเมินนี้ในระบบ" });
+    }
+
+    const activitiesResult = await db.query(
+      `SELECT id, component_id, activity_text, maturity_level, sort_order
+       FROM component_activities
+       WHERE component_id = $1
+       ORDER BY maturity_level ASC, sort_order ASC, id ASC`,
+      [componentId],
+    );
+
+    res.json({
+      success: true,
+      data: {
+        component: componentResult.rows[0],
+        activities: activitiesResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Get Component Activities Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูล Activities",
+    });
+  }
+};
+
+// เพิ่ม Activity ใหม่ให้ Component
+exports.addComponentActivity = async (req, res) => {
+  const { component_id, activity_text, maturity_level, sort_order } =
+    req.body;
+
+  if (!component_id || !activity_text || maturity_level === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณากรอกข้อมูลให้ครบถ้วนทุกช่อง" });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO component_activities (component_id, activity_text, maturity_level, sort_order)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [
+        component_id,
+        activity_text.trim(),
+        parseInt(maturity_level),
+        parseInt(sort_order) || 0,
+      ],
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "เพิ่ม Activity สำเร็จ",
+      data: { id: result.rows[0].id },
+    });
+  } catch (error) {
+    console.error("Add Component Activity Error:", error);
+    if (error.code === "23503") {
+      return res.status(400).json({
+        success: false,
+        message: "ไม่พบหัวข้อการประเมินหรือระดับความพร้อมที่ระบุ",
+      });
+    }
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
+// แก้ไข Activity
+exports.updateComponentActivity = async (req, res) => {
+  const { id } = req.params;
+  const { activity_text, maturity_level, sort_order } = req.body;
+
+  if (!activity_text || maturity_level === undefined) {
+    return res
+      .status(400)
+      .json({ success: false, message: "กรุณากรอกข้อมูลให้ครบถ้วน" });
+  }
+
+  try {
+    const result = await db.query(
+      `UPDATE component_activities
+       SET activity_text = $1, maturity_level = $2, sort_order = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4 RETURNING id`,
+      [
+        activity_text.trim(),
+        parseInt(maturity_level),
+        parseInt(sort_order) || 0,
+        id,
+      ],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบ Activity ที่ต้องการแก้ไข" });
+    }
+
+    res.json({ success: true, message: "แก้ไข Activity สำเร็จ" });
+  } catch (error) {
+    console.error("Update Component Activity Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการแก้ไขข้อมูล" });
+  }
+};
+
+// ลบ Activity
+exports.deleteComponentActivity = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await db.query(
+      "DELETE FROM component_activities WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบ Activity ที่ต้องการลบ" });
+    }
+
+    res.json({ success: true, message: "ลบ Activity สำเร็จ" });
+  } catch (error) {
+    console.error("Delete Component Activity Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
 exports.getMappingMatrix = async (req, res) => {
   const { role } = req.query; // รับ parameter role (เช่น regulator, policy) เพื่อกรองข้อมูล
 
