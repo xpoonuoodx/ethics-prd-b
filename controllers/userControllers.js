@@ -553,7 +553,7 @@ exports.generateToolResult = async (req, res) => {
     } else if (userType.toLowerCase().includes("developer")) {
       roleStr = "developer";
     } else if (userType.toLowerCase().includes("provider")) {
-      roleStr = "provider";
+      roleStr = "service provider";
     } else if (userType.toLowerCase().includes("users")) {
       roleStr = "users";
     }
