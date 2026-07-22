@@ -2,6 +2,17 @@ const db = require("../db");
 const bcrypt = require("bcryptjs");
 const { isValidUsername, isValidPassword } = require("../utils/validators");
 
+// กลุ่มอุตสาหกรรมของหน่วยงาน
+const VALID_SECTORS = [
+  "government",
+  "finance",
+  "healthcare",
+  "education",
+  "industry",
+  "commerce",
+  "other",
+];
+
 // 1. ดึงข้อมูล Dashboard
 exports.getDashboard = async (req, res) => {
   try {
@@ -194,6 +205,13 @@ exports.addUser = async (req, res) => {
       message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)",
     });
   }
+  // profiles.id_card เป็น NOT NULL + UNIQUE ในฐานข้อมูล ต้องเช็คให้มีค่าก่อน insert เสมอ
+  if (!id_card) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณาระบุเลขประจำตัวประชาชน",
+    });
+  }
 
   try {
     const userId = req.user.account_id || req.user.id;
@@ -217,18 +235,27 @@ exports.addUser = async (req, res) => {
         .json({ success: false, message: "ชื่อผู้ใช้งานนี้ถูกใช้ไปแล้ว" });
     }
 
-    if (id_card) {
-      const checkIdCard = await db.query(
-        "SELECT id FROM profiles WHERE id_card = $1",
-        [id_card],
-      );
-      if (checkIdCard.rows.length > 0) {
-        await db.query("ROLLBACK");
-        return res.status(400).json({
-          success: false,
-          message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
-        });
-      }
+    const checkIdCard = await db.query(
+      "SELECT id FROM profiles WHERE id_card = $1",
+      [id_card],
+    );
+    if (checkIdCard.rows.length > 0) {
+      await db.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
+      });
+    }
+
+    const checkEmail = await db.query(
+      "SELECT id FROM profiles WHERE email = $1",
+      [email],
+    );
+    if (checkEmail.rows.length > 0) {
+      await db.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ success: false, message: "อีเมลนี้ถูกใช้งานแล้ว" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -1373,7 +1400,7 @@ exports.getOrganizationInfo = async (req, res) => {
     }
 
     const orgResult = await db.query(
-      `SELECT id, org_code, org_name, status, created_at
+      `SELECT id, org_code, org_name, status, sector, created_at
        FROM organizations
        WHERE id = $1`,
       [orgId],
@@ -1436,13 +1463,21 @@ exports.getOrganizationInfo = async (req, res) => {
 };
 
 // แก้ไขชื่อหน่วยงานของตัวเอง (org_code / status ปรับได้เฉพาะฝั่ง Admin เท่านั้น)
+// sector: Regulator ตั้งค่าได้ "ครั้งเดียว" เฉพาะตอนที่หน่วยงานยังไม่เคยมีค่านี้ (หลังจากนั้นต้องให้ Admin แก้แทน)
 exports.editOrganizationInfo = async (req, res) => {
-  const { org_name } = req.body;
+  const { org_name, sector } = req.body;
 
-  if (!org_name || org_name.trim() === "") {
+  const hasNameChange = org_name && org_name.trim() !== "";
+  if (!hasNameChange && !sector) {
     return res
       .status(400)
-      .json({ success: false, message: "กรุณาระบุชื่อหน่วยงาน" });
+      .json({ success: false, message: "กรุณาระบุข้อมูลที่ต้องการแก้ไข" });
+  }
+  if (sector && !VALID_SECTORS.includes(sector)) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณาเลือกกลุ่มอุตสาหกรรม (Sector) ให้ถูกต้อง",
+    });
   }
 
   try {
@@ -1460,17 +1495,42 @@ exports.editOrganizationInfo = async (req, res) => {
       });
     }
 
+    const setClauses = [];
+    const params = [];
+
+    if (hasNameChange) {
+      params.push(org_name.trim());
+      setClauses.push(`org_name = $${params.length}`);
+    }
+
+    if (sector) {
+      const currentOrg = await db.query(
+        "SELECT sector FROM organizations WHERE id = $1",
+        [orgId],
+      );
+      if (currentOrg.rows[0]?.sector) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "หน่วยงานนี้มีการกำหนด Sector ไว้แล้ว กรุณาติดต่อผู้ดูแลระบบหากต้องการเปลี่ยนแปลง",
+        });
+      }
+      params.push(sector);
+      setClauses.push(`sector = $${params.length}`);
+    }
+
+    params.push(orgId);
     await db.query(
-      "UPDATE organizations SET org_name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
-      [org_name.trim(), orgId],
+      `UPDATE organizations SET ${setClauses.join(", ")}, updated_at = CURRENT_TIMESTAMP WHERE id = $${params.length}`,
+      params,
     );
 
-    res.json({ success: true, message: "แก้ไขชื่อหน่วยงานสำเร็จ" });
+    res.json({ success: true, message: "แก้ไขข้อมูลหน่วยงานสำเร็จ" });
   } catch (error) {
     console.error("Edit Regulator Organization Info Error:", error);
     res.status(500).json({
       success: false,
-      message: "เกิดข้อผิดพลาดในการแก้ไขชื่อหน่วยงาน",
+      message: "เกิดข้อผิดพลาดในการแก้ไขข้อมูลหน่วยงาน",
     });
   }
 };

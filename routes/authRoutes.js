@@ -1,8 +1,9 @@
 const express = require("express");
 const authControllers = require("../controllers/authControllers");
+const { loginLimiter } = require("../middlewares/rateLimitMiddlewares");
 const router = express.Router();
 
-router.post("/login", authControllers.login);
+router.post("/login", loginLimiter, authControllers.login);
 
 // ลงทะเบียนผู้ใช้งานใหม่
 router.post("/register", authControllers.register);
