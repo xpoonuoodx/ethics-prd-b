@@ -52,7 +52,7 @@ app.use(
   swaggerUi.serve,
   swaggerUi.setup(swaggerSpec, { explorer: true }),
 );
-//ดีพอยเวอรชันใหม่
+//ดีพอยเวอรชันใหม่ 2
 // Routes
 // app.use('/', homeRoutes);
 app.use('/public', publicRoutes);
