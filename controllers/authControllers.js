@@ -119,6 +119,17 @@ const VALID_USER_TYPES = [
   "users",
 ];
 
+// กลุ่มอุตสาหกรรมของหน่วยงาน (เฉพาะสมัครในฐานะหน่วยงาน)
+const VALID_SECTORS = [
+  "government",
+  "finance",
+  "healthcare",
+  "education",
+  "industry",
+  "commerce",
+  "other",
+];
+
 exports.register = async (req, res) => {
   const {
     account_type, // "organization" | "individual"
@@ -130,6 +141,7 @@ exports.register = async (req, res) => {
     password,
     user_type,
     org_name,
+    sector,
   } = req.body;
 
   const isOrganization = account_type === "organization";
@@ -150,6 +162,13 @@ exports.register = async (req, res) => {
   if (isOrganization && (!org_name || org_name.trim() === "")) {
     return res.status(400).json({ message: "กรุณาระบุชื่อหน่วยงาน" });
   }
+  if (isOrganization && !VALID_SECTORS.includes(sector)) {
+    return res.status(400).json({ message: "กรุณาเลือกกลุ่มอุตสาหกรรม (Sector) ให้ถูกต้อง" });
+  }
+  // profiles.id_card เป็น NOT NULL + UNIQUE ในฐานข้อมูล ต้องเช็คให้มีค่าก่อน insert เสมอ
+  if (!id_card) {
+    return res.status(400).json({ message: "กรุณาระบุเลขประจำตัวประชาชน" });
+  }
 
   const client = await db.getClient(); // ใช้ client เพื่อทำ Transaction
 
@@ -169,20 +188,26 @@ exports.register = async (req, res) => {
     }
 
     // ตรวจสอบ Email หรือ เลขบัตรประชาชน ซ้ำในตาราง profiles
+    // (เช็ค id_card แยกและเฉพาะเมื่อมีค่าจริง ป้องกันไปชนกับแถวอื่นที่ id_card เป็นค่าว่างเหมือนกัน)
     const checkProfile = await client.query(
-      "SELECT email, id_card FROM profiles WHERE email = $1 OR id_card = $2",
-      [email, id_card],
+      "SELECT email FROM profiles WHERE email = $1",
+      [email],
     );
     if (checkProfile.rows.length > 0) {
       await client.query("ROLLBACK");
-      const existingProfile = checkProfile.rows[0];
-      if (existingProfile.id_card === id_card) {
+      return res.status(400).json({ message: "อีเมลนี้ถูกใช้งานแล้ว" });
+    }
+
+    if (id_card) {
+      const checkIdCard = await client.query(
+        "SELECT id FROM profiles WHERE id_card = $1",
+        [id_card],
+      );
+      if (checkIdCard.rows.length > 0) {
+        await client.query("ROLLBACK");
         return res
           .status(400)
           .json({ message: "เลขประจำตัวประชาชนนี้ถูกลงทะเบียนแล้ว" });
-      }
-      if (existingProfile.email === email) {
-        return res.status(400).json({ message: "อีเมลนี้ถูกใช้งานแล้ว" });
       }
     }
 
@@ -195,8 +220,8 @@ exports.register = async (req, res) => {
       const orgCode = `ORG-${yy}${mm}-${crypto.randomBytes(3).toString("hex")}`;
 
       const insertOrg = await client.query(
-        `INSERT INTO organizations (org_code, org_name, status) VALUES ($1, $2, 'Active') RETURNING id`,
-        [orgCode, org_name.trim()],
+        `INSERT INTO organizations (org_code, org_name, status, sector) VALUES ($1, $2, 'Active', $3) RETURNING id`,
+        [orgCode, org_name.trim(), sector],
       );
       organizationId = insertOrg.rows[0].id;
     }
@@ -305,37 +330,46 @@ exports.verifyEmail = async (req, res) => {
 // --- FORGOT PASSWORD (ส่งอีเมล) ---
 exports.forgotPassword = async (req, res) => {
   const { email } = req.body;
+  // ข้อความตอบกลับแบบเดียวกันเสมอ ไม่ว่าอีเมลนี้จะมีอยู่ในระบบหรือไม่
+  // กันไม่ให้ใช้ endpoint นี้ไล่เช็คว่าอีเมลไหนสมัครไว้บ้าง (user enumeration)
+  const genericResponse = {
+    message: "หากอีเมลนี้มีอยู่ในระบบ เราได้ส่งลิงก์สำหรับตั้งรหัสผ่านใหม่ไปให้แล้ว",
+  };
+
   try {
     const result = await db.query("SELECT id FROM profiles WHERE email = $1", [
       email,
     ]);
     if (result.rows.length === 0) {
-      return res.status(404).json({ message: "ไม่พบอีเมลนี้ในระบบ" });
+      return res.json(genericResponse);
     }
 
     const resetToken = crypto.randomBytes(32).toString("hex");
 
-    // บันทึก Token ลงตาราง profiles
-    await db.query("UPDATE profiles SET reset_token = $1 WHERE email = $2", [
-      resetToken,
-      email,
-    ]);
+    // บันทึก Token ลงตาราง profiles พร้อมวันหมดอายุ 1 ชั่วโมง กันลิงก์เก่าถูกนำไปใช้ซ้ำภายหลัง
+    await db.query(
+      `UPDATE profiles
+       SET reset_token = $1, reset_token_expires_at = NOW() + INTERVAL '1 hour'
+       WHERE email = $2`,
+      [resetToken, email],
+    );
 
     const resetUrl = `${process.env.MYAPP_FRONTEND_URL}/reset-password?token=${resetToken}`;
     const html = `
       <div style="font-family: 'Kanit', sans-serif; padding: 20px;">
         <h2>แจ้งลืมรหัสผ่าน</h2>
-        <p>คุณได้ทำการขอเปลี่ยนรหัสผ่านใหม่ กรุณาคลิกปุ่มด้านล่าง:</p>
+        <p>คุณได้ทำการขอเปลี่ยนรหัสผ่านใหม่ กรุณาคลิกปุ่มด้านล่าง (ลิงก์นี้จะหมดอายุใน 1 ชั่วโมง):</p>
         <a href="${resetUrl}" style="background: #2d6a4f; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">ตั้งรหัสผ่านใหม่</a>
         <p>หากคุณไม่ได้เป็นคนขอ กรุณาเพิกเฉยต่ออีเมลฉบับนี้</p>
       </div>
     `;
 
     await sendMail(email, "เปลี่ยนรหัสผ่านใหม่ - Ethic AI", html);
-    res.json({ message: "ส่งอีเมลเรียบร้อยแล้ว" });
+    res.json(genericResponse);
   } catch (error) {
     console.error("Forgot Password Error:", error);
-    res.status(500).json({ message: "เกิดข้อผิดพลาดในการส่งอีเมล" });
+    // ตอบข้อความเดิมแม้เกิดข้อผิดพลาดฝั่งเรา เพื่อไม่เปิดเผยสถานะภายในให้ผู้ไม่หวังดี
+    res.json(genericResponse);
   }
 };
 
@@ -348,9 +382,10 @@ exports.resetPassword = async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // หา user_id จากตาราง profiles ด้วย token
+    // หา user_id จากตาราง profiles ด้วย token พร้อมเช็คว่ายังไม่หมดอายุ
     const result = await client.query(
-      "SELECT user_id FROM profiles WHERE reset_token = $1",
+      `SELECT user_id FROM profiles
+       WHERE reset_token = $1 AND reset_token_expires_at > NOW()`,
       [token],
     );
 
@@ -368,9 +403,11 @@ exports.resetPassword = async (req, res) => {
       userId,
     ]);
 
-    // 2. เคลียร์ reset_token ในตาราง profiles
+    // 2. เคลียร์ reset_token ในตาราง profiles กันนำ token เดิมกลับมาใช้ซ้ำ
     await client.query(
-      "UPDATE profiles SET reset_token = NULL WHERE reset_token = $1",
+      `UPDATE profiles
+       SET reset_token = NULL, reset_token_expires_at = NULL
+       WHERE reset_token = $1`,
       [token],
     );
 

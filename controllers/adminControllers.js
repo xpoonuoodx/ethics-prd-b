@@ -2,6 +2,17 @@ const db = require("../db");
 const bcrypt = require("bcryptjs");
 const { isValidUsername, isValidPassword } = require("../utils/validators");
 
+// กลุ่มอุตสาหกรรมของหน่วยงาน
+const VALID_SECTORS = [
+  "government",
+  "finance",
+  "healthcare",
+  "education",
+  "industry",
+  "commerce",
+  "other",
+];
+
 // 1. ดึงข้อมูลหน้า Dashboard (ภาพรวม)
 exports.getDashboard = async (req, res) => {
   try {
@@ -70,17 +81,18 @@ exports.getDashboard = async (req, res) => {
 exports.getOrganizations = async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT 
+      SELECT
         o.id as db_id,
         o.org_code,
         o.org_name,
         o.status,
+        o.sector,
         COALESCE(
-          (SELECT p.first_name_th || ' ' || p.last_name_th 
-           FROM users u 
-           JOIN profiles p ON u.id = p.user_id 
-           WHERE u.organization_id = o.id AND u.role = 'regulator' 
-           LIMIT 1), 
+          (SELECT p.first_name_th || ' ' || p.last_name_th
+           FROM users u
+           JOIN profiles p ON u.id = p.user_id
+           WHERE u.organization_id = o.id AND u.role = 'regulator'
+           LIMIT 1),
           'ยังไม่มีผู้ดูแล'
         ) as regulator_name,
         (SELECT COUNT(*) FROM projects p WHERE p.organization_id = o.id) as total_projects,
@@ -97,6 +109,7 @@ exports.getOrganizations = async (req, res) => {
       totalProjects: parseInt(row.total_projects) || 0,
       totalUsers: parseInt(row.total_users) || 0,
       status: row.status || "Active",
+      sector: row.sector || null,
     }));
 
     res.json({ success: true, data: formattedData });
@@ -111,7 +124,14 @@ exports.getOrganizations = async (req, res) => {
 
 // 3. เพิ่มหน่วยงานใหม่
 exports.addOrganization = async (req, res) => {
-  const { id, name, regulatorName, status } = req.body;
+  const { id, name, regulatorName, status, sector } = req.body;
+
+  if (!VALID_SECTORS.includes(sector)) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณาเลือกกลุ่มอุตสาหกรรม (Sector) ให้ถูกต้อง",
+    });
+  }
 
   try {
     // ตรวจสอบก่อนว่ารหัสหน่วยงานนี้ถูกใช้ไปแล้วหรือยัง กันบันทึกซ้ำ
@@ -129,8 +149,8 @@ exports.addOrganization = async (req, res) => {
 
     // บันทึกเฉพาะโครงสร้างหน่วยงานไปก่อน ตามลำดับการทำงาน (สร้างบ้านก่อนเอาคนเข้าอยู่)
     await db.query(
-      "INSERT INTO organizations (org_code, org_name, status) VALUES ($1, $2, $3)",
-      [id, name, status],
+      "INSERT INTO organizations (org_code, org_name, status, sector) VALUES ($1, $2, $3, $4)",
+      [id, name, status, sector],
     );
 
     res.status(201).json({ success: true, message: "เพิ่มหน่วยงานสำเร็จ" });
@@ -148,23 +168,30 @@ exports.addOrganization = async (req, res) => {
 exports.editOrganize = async (req, res) => {
   try {
     const { id } = req.params; // อาจจะเป็นเลข id หรือ org_code เช่น ORG-001 ตามที่รับมาจากหน้าเว็บ
-    const { org_name } = req.body;
+    const { org_name, sector } = req.body;
 
     if (!org_name || org_name.trim() === "") {
       return res
         .status(400)
         .json({ success: false, message: "กรุณาระบุชื่อหน่วยงาน" });
     }
+    if (sector !== undefined && sector !== null && !VALID_SECTORS.includes(sector)) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาเลือกกลุ่มอุตสาหกรรม (Sector) ให้ถูกต้อง",
+      });
+    }
 
     // คำสั่งอัปเดต โดยครอบคลุมกรณีที่ส่งมาเป็นเลข ID หรือรหัส org_code (รองรับความยืดหยุ่น)
+    // Admin แก้ sector ได้เสมอไม่ว่าจะเคยตั้งค่าไว้แล้วหรือไม่ (ต่างจากฝั่ง Regulator ที่ตั้งได้ครั้งเดียว)
     const updateQuery = `
-      UPDATE organizations 
-      SET org_name = $1, updated_at = CURRENT_TIMESTAMP 
-      WHERE id::text = $2 OR org_code = $2
+      UPDATE organizations
+      SET org_name = $1, sector = COALESCE($2, sector), updated_at = CURRENT_TIMESTAMP
+      WHERE id::text = $3 OR org_code = $3
       RETURNING *
     `;
 
-    const result = await db.query(updateQuery, [org_name, id]);
+    const result = await db.query(updateQuery, [org_name, sector || null, id]);
 
     if (result.rowCount === 0) {
       return res.status(404).json({
@@ -279,6 +306,13 @@ exports.addUser = async (req, res) => {
       message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)",
     });
   }
+  // profiles.id_card เป็น NOT NULL + UNIQUE ในฐานข้อมูล ต้องเช็คให้มีค่าก่อน insert เสมอ
+  if (!id_card) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณาระบุเลขประจำตัวประชาชน",
+    });
+  }
 
   try {
     // เริ่มต้น Transaction ผ่านตัว db.query ตรงๆ ตามที่ต้องการ
@@ -295,6 +329,31 @@ exports.addUser = async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "ชื่อผู้ใช้งานนี้ถูกใช้ไปแล้ว" });
+    }
+
+    // ตรวจสอบความซ้ำซ้อนของเลขประจำตัวประชาชน
+    const checkIdCard = await db.query(
+      "SELECT id FROM profiles WHERE id_card = $1",
+      [id_card],
+    );
+    if (checkIdCard.rows.length > 0) {
+      await db.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
+      });
+    }
+
+    // ตรวจสอบความซ้ำซ้อนของอีเมล
+    const checkEmail = await db.query(
+      "SELECT id FROM profiles WHERE email = $1",
+      [email],
+    );
+    if (checkEmail.rows.length > 0) {
+      await db.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ success: false, message: "อีเมลนี้ถูกใช้งานแล้ว" });
     }
 
     // เข้ารหัสผ่านเพื่อความปลอดภัย
@@ -337,7 +396,7 @@ exports.addUser = async (req, res) => {
     // 2. สั่งบันทึกข้อมูลส่วนบุคคลลงตาราง profiles พร้อมผูกข้อมูล email และ id_card ที่ส่งมาจากหน้าบ้าน
     await db.query(
       `
-      INSERT INTO profiles (user_id, first_name_th, last_name_th, email, id_card, is_verified) 
+      INSERT INTO profiles (user_id, first_name_th, last_name_th, email, id_card, is_verified)
       VALUES ($1, $2, $3, $4, $5, true)
     `,
       [newUserId, firstName, lastName, email, id_card],
@@ -588,17 +647,18 @@ exports.viewOrganization = async (req, res) => {
     // 1. ดึงข้อมูลภาพรวมของหน่วยงาน
     const orgResult = await db.query(
       `
-      SELECT 
+      SELECT
         o.id as db_id,
         o.org_code,
         o.org_name,
         o.status,
+        o.sector,
         COALESCE(
-          (SELECT p.first_name_th || ' ' || p.last_name_th 
-           FROM users u 
-           JOIN profiles p ON u.id = p.user_id 
-           WHERE u.organization_id = o.id AND u.role = 'regulator' 
-           LIMIT 1), 
+          (SELECT p.first_name_th || ' ' || p.last_name_th
+           FROM users u
+           JOIN profiles p ON u.id = p.user_id
+           WHERE u.organization_id = o.id AND u.role = 'regulator'
+           LIMIT 1),
           'ยังไม่มีผู้ดูแล'
         ) as regulator_name,
         (SELECT COUNT(*) FROM projects p WHERE p.organization_id = o.id) as total_projects,
@@ -676,6 +736,7 @@ exports.viewOrganization = async (req, res) => {
           totalProjects: parseInt(orgData.total_projects) || 0,
           totalUsers: parseInt(orgData.total_users) || 0,
           status: orgData.status || "Active",
+          sector: orgData.sector || null,
         },
         users: usersResult.rows,
         projects: projectsResult.rows, // ส่ง Array โครงการไปให้หน้าบ้าน
