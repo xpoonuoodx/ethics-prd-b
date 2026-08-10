@@ -172,4 +172,15 @@ router.delete(
   adminControllers.deleteOrganization,
 );
 
+// ภาพรวมโครงการ - Admin ดูได้ทุกโครงการทุกหน่วยงาน (read-only)
+router.get("/get-all-projects", verifyToken, adminControllers.getAllProjects);
+router.get("/view-project/:id", verifyToken, adminControllers.viewProject);
+
+// กิจกรรมล่าสุดในระบบ สำหรับหน้า Dashboard
+router.get(
+  "/recent-activity",
+  verifyToken,
+  adminControllers.getRecentActivity,
+);
+
 module.exports = router;

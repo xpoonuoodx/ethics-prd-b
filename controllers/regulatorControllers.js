@@ -472,7 +472,8 @@ exports.getProjects = async (req, res) => {
 
 // 6. สร้างโครงการใหม่
 exports.addProject = async (req, res) => {
-  const { project_code, project_name } = req.body;
+  const { project_code, project_name, project_type, ai_objective, accountable_owner } =
+    req.body;
 
   try {
     const userId = req.user.account_id || req.user.id;
@@ -493,9 +494,17 @@ exports.addProject = async (req, res) => {
     }
 
     await db.query(
-      `INSERT INTO projects (project_code, project_name, organization_id, created_by, progress, status) 
-       VALUES ($1, $2, $3, $4, 0, 'Pending')`,
-      [project_code, project_name, orgId, userId],
+      `INSERT INTO projects (project_code, project_name, organization_id, created_by, progress, status, project_type, ai_objective, accountable_owner)
+       VALUES ($1, $2, $3, $4, 0, 'Pending', $5, $6, $7)`,
+      [
+        project_code,
+        project_name,
+        orgId,
+        userId,
+        project_type || null,
+        ai_objective || null,
+        accountable_owner || null,
+      ],
     );
 
     res.status(201).json({ success: true, message: "สร้างโครงการสำเร็จ" });
@@ -587,10 +596,10 @@ exports.assignUserToProject = async (req, res) => {
   }
 };
 
-// 8a. แก้ไขชื่อโครงการ
+// 8a. แก้ไขข้อมูลโครงการ
 exports.editProject = async (req, res) => {
   const { id } = req.params;
-  const { project_name } = req.body;
+  const { project_name, project_type, ai_objective, accountable_owner } = req.body;
 
   if (!project_name || project_name.trim() === "") {
     return res
@@ -619,12 +628,20 @@ exports.editProject = async (req, res) => {
         .json({ success: false, message: "ไม่มีสิทธิ์แก้ไขโครงการนี้" });
     }
 
-    await db.query("UPDATE projects SET project_name = $1 WHERE id = $2", [
-      project_name.trim(),
-      id,
-    ]);
+    await db.query(
+      `UPDATE projects
+       SET project_name = $1, project_type = $2, ai_objective = $3, accountable_owner = $4
+       WHERE id = $5`,
+      [
+        project_name.trim(),
+        project_type || null,
+        ai_objective || null,
+        accountable_owner || null,
+        id,
+      ],
+    );
 
-    res.json({ success: true, message: "แก้ไขชื่อโครงการสำเร็จ" });
+    res.json({ success: true, message: "แก้ไขข้อมูลโครงการสำเร็จ" });
   } catch (error) {
     console.error("Edit Project Error:", error);
     res
@@ -698,6 +715,7 @@ exports.viewProject = async (req, res) => {
     const projectResult = await db.query(
       `SELECT
          id, project_code, project_name, progress, created_at,
+         project_type, ai_objective, accountable_owner,
          (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = projects.id) as total_members,
          (SELECT COUNT(*) FROM project_members pm
             WHERE pm.project_id = projects.id
