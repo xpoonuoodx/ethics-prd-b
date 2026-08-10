@@ -17,21 +17,58 @@ const VALID_SECTORS = [
 exports.getDashboard = async (req, res) => {
   try {
     const statsResult = await db.query(`
-      SELECT 
+      SELECT
         (SELECT COUNT(*) FROM organizations) as total_organizations,
         (SELECT COUNT(*) FROM users WHERE role = 'regulator') as total_regulators,
         (SELECT COUNT(*) FROM projects) as total_projects,
-        (SELECT COUNT(*) FROM users) as total_users
+        (SELECT COUNT(*) FROM users) as total_users,
+        (SELECT COUNT(*) FROM certificates) as total_certificates
     `);
 
     const stats = statsResult.rows[0];
 
+    // คะแนนเฉลี่ยจริยธรรม AI รายหลักการ รวมทุกโครงการทุกหน่วยงานทั้งระบบ (คนละอันกับ radar
+    // ระดับโครงการเดียวใน adminControllers.viewProject - อันนี้ไม่กรองด้วย project_members
+    // เพื่อให้เห็นภาพรวมทั้งแพลตฟอร์ม ไม่ใช่แค่คนที่ถูก assign เข้าโครงการ)
+    const radarResult = await db.query(`
+      SELECT
+        pri->>'id' as principle_id,
+        pri->>'name' as principle_name,
+        AVG((uth.maturity_id::float / max_level.max_id) * 100) as avg_score
+      FROM user_tools_history uth
+      CROSS JOIN LATERAL jsonb_array_elements(uth.result_data->'principles') AS pri
+      CROSS JOIN (SELECT MAX(level_id) as max_id FROM maturity_levels WHERE is_active = true) max_level
+      GROUP BY pri->>'id', pri->>'name'
+      ORDER BY pri->>'id' ASC
+    `);
+    const ethicsRadar = radarResult.rows.map((row) => ({
+      subject: row.principle_name,
+      score: Math.round(parseFloat(row.avg_score)),
+      fullMark: 100,
+    }));
+
+    // สัดส่วนผู้ใช้งานตามประเภท (ไม่รวม admin เพราะไม่ใช่ผู้ใช้งานแพลตฟอร์มจริง)
+    const userTypeResult = await db.query(`
+      SELECT
+        COALESCE(NULLIF(user_type, ''), 'ไม่ระบุ') as user_type,
+        COUNT(*) as count
+      FROM users
+      WHERE role != 'admin'
+      GROUP BY COALESCE(NULLIF(user_type, ''), 'ไม่ระบุ')
+      ORDER BY count DESC
+    `);
+    const userTypeBreakdown = userTypeResult.rows.map((row) => ({
+      userType: row.user_type,
+      count: parseInt(row.count) || 0,
+    }));
+
     const orgsResult = await db.query(`
-      SELECT 
+      SELECT
         o.id,
         o.org_code,
         o.org_name,
         o.status,
+        o.sector,
         COALESCE(
           (SELECT p.first_name_th || ' ' || p.last_name_th 
            FROM users u 
@@ -53,6 +90,7 @@ exports.getDashboard = async (req, res) => {
       totalProjects: parseInt(row.total_projects) || 0,
       totalUsers: parseInt(row.total_users) || 0,
       status: row.status || "Active",
+      sector: row.sector || null,
     }));
 
     res.status(200).json({
@@ -64,8 +102,11 @@ exports.getDashboard = async (req, res) => {
           totalRegulators: parseInt(stats.total_regulators) || 0,
           totalProjects: parseInt(stats.total_projects) || 0,
           totalUsers: parseInt(stats.total_users) || 0,
+          totalCertificates: parseInt(stats.total_certificates) || 0,
         },
         organizations: formattedOrganizations,
+        userTypeBreakdown,
+        ethicsRadar,
       },
     });
   } catch (error) {
@@ -1890,5 +1931,218 @@ exports.deleteOrganization = async (req, res) => {
       success: false,
       message: "เกิดข้อผิดพลาดทางเซิร์ฟเวอร์ ไม่สามารถลบข้อมูลได้",
     });
+  }
+};
+
+// ==========================================
+// ภาพรวมโครงการ (Project Overview) - Admin ดูได้ทุกโครงการทุกหน่วยงาน (read-only)
+// ==========================================
+
+// ดึงรายการโครงการทั้งหมดในระบบ ไม่จำกัดหน่วยงาน (ต่างจาก regulator ที่เห็นแค่ของหน่วยงานตัวเอง)
+exports.getAllProjects = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        p.id,
+        p.project_code,
+        p.project_name,
+        p.project_type,
+        p.status,
+        p.created_at,
+        o.org_name,
+        o.org_code,
+        (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id) as total_members,
+        (SELECT COUNT(*) FROM project_members pm
+           WHERE pm.project_id = p.id
+           AND EXISTS (SELECT 1 FROM user_tools_history uth WHERE uth.user_id = pm.user_id)
+        ) as completed_members
+      FROM projects p
+      LEFT JOIN organizations o ON p.organization_id = o.id
+      ORDER BY p.created_at DESC
+    `);
+
+    // สถานะโครงการคำนวณสดจากจำนวนสมาชิกที่ทำแบบประเมินตนเองแล้วเทียบกับสมาชิกทั้งหมด (เหมือนฝั่ง regulator)
+    const projects = result.rows.map((row) => {
+      const total = parseInt(row.total_members) || 0;
+      const completed = parseInt(row.completed_members) || 0;
+      let status = "Pending";
+      if (total > 0 && completed === total) status = "Completed";
+      else if (completed > 0) status = "In Progress";
+      return {
+        ...row,
+        status,
+        total_members: total,
+        completed_members: completed,
+      };
+    });
+
+    res.json({ success: true, data: projects });
+  } catch (error) {
+    console.error("Get All Projects Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "ดึงข้อมูลภาพรวมโครงการผิดพลาด" });
+  }
+};
+
+// ดูรายละเอียดโครงการรายตัว ไม่จำกัดหน่วยงาน (แบบเดียวกับ regulatorControllers.viewProject
+// แต่ตัดเงื่อนไข "ต้องเป็นหน่วยงานตัวเอง" ออก เพราะ admin ดูของหน่วยงานไหนก็ได้)
+exports.viewProject = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const projectResult = await db.query(
+      `SELECT
+         p.id, p.project_code, p.project_name, p.progress, p.created_at,
+         p.project_type, p.ai_objective, p.accountable_owner,
+         o.org_name, o.org_code, o.sector,
+         (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id) as total_members,
+         (SELECT COUNT(*) FROM project_members pm
+            WHERE pm.project_id = p.id
+            AND EXISTS (SELECT 1 FROM user_tools_history uth WHERE uth.user_id = pm.user_id)
+         ) as completed_members
+       FROM projects p
+       LEFT JOIN organizations o ON p.organization_id = o.id
+       WHERE p.id = $1`,
+      [id],
+    );
+
+    if (projectResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "ไม่พบข้อมูลโครงการ",
+      });
+    }
+
+    const projectRow = projectResult.rows[0];
+    const totalMembers = parseInt(projectRow.total_members) || 0;
+    const completedMembers = parseInt(projectRow.completed_members) || 0;
+    let status = "Pending";
+    if (totalMembers > 0 && completedMembers === totalMembers)
+      status = "Completed";
+    else if (completedMembers > 0) status = "In Progress";
+
+    const projectData = {
+      ...projectRow,
+      status,
+      total_members: totalMembers,
+      completed_members: completedMembers,
+    };
+
+    // รายชื่อสมาชิก พร้อมสถานะว่าทำแบบประเมินตนเองแล้วหรือยัง (has_assessed) และถือใบประกาศแล้วหรือยัง
+    const membersResult = await db.query(
+      `SELECT
+         u.id,
+         u.username,
+         p.first_name_th || ' ' || p.last_name_th AS name,
+         p.email,
+         EXISTS (
+           SELECT 1 FROM user_tools_history uth WHERE uth.user_id = u.id
+         ) as has_assessed,
+         EXISTS (
+           SELECT 1 FROM certificates c WHERE c.user_id = u.id
+         ) as has_certificate
+       FROM project_members pm
+       JOIN users u ON pm.user_id = u.id
+       LEFT JOIN profiles p ON u.id = p.user_id
+       WHERE pm.project_id = $1`,
+      [id],
+    );
+
+    // คะแนนประเมินจริยธรรม AI เฉลี่ยรายหลักการ เฉพาะ "สมาชิกในโครงการนี้เท่านั้น" (query เดียวกับฝั่ง regulator)
+    const radarRes = await db.query(
+      `
+      SELECT
+        pri->>'id' as principle_id,
+        pri->>'name' as principle_name,
+        AVG((uth.maturity_id::float / max_level.max_id) * 100) as avg_score
+      FROM user_tools_history uth
+      JOIN project_members pm ON pm.user_id = uth.user_id
+      CROSS JOIN LATERAL jsonb_array_elements(uth.result_data->'principles') AS pri
+      CROSS JOIN (SELECT MAX(level_id) as max_id FROM maturity_levels WHERE is_active = true) max_level
+      WHERE pm.project_id = $1
+      GROUP BY pri->>'id', pri->>'name'
+      ORDER BY pri->>'id' ASC
+    `,
+      [id],
+    );
+
+    // คะแนนเฉลี่ยรายหลักการทั้งระบบ (ทุกโครงการ) เอาไว้เทียบกับคะแนนของโครงการนี้ในกราฟเดียวกัน
+    const systemRadarRes = await db.query(`
+      SELECT
+        pri->>'id' as principle_id,
+        AVG((uth.maturity_id::float / max_level.max_id) * 100) as avg_score
+      FROM user_tools_history uth
+      CROSS JOIN LATERAL jsonb_array_elements(uth.result_data->'principles') AS pri
+      CROSS JOIN (SELECT MAX(level_id) as max_id FROM maturity_levels WHERE is_active = true) max_level
+      GROUP BY pri->>'id'
+    `);
+    const systemAvgByPrinciple = {};
+    systemRadarRes.rows.forEach((row) => {
+      systemAvgByPrinciple[row.principle_id] = Math.round(parseFloat(row.avg_score));
+    });
+
+    // ชื่อระดับ maturity ที่ใกล้เคียงกับคะแนนแต่ละหลักการ เพื่อโชว์คู่กับตัวเลข (เช่น "ระดับ 4: Managed")
+    const maturityLevelsRes = await db.query(
+      `SELECT level_id, level_name FROM maturity_levels WHERE is_active = true ORDER BY level_id ASC`,
+    );
+    const maturityLevels = maturityLevelsRes.rows;
+    const maxLevelId = maturityLevels.length
+      ? Math.max(...maturityLevels.map((l) => l.level_id))
+      : 0;
+    const levelNameForScore = (score) => {
+      if (!maxLevelId) return null;
+      const estimatedLevelId = Math.max(
+        1,
+        Math.round((score / 100) * maxLevelId),
+      );
+      const match = maturityLevels.find((l) => l.level_id === estimatedLevelId);
+      return match ? `ระดับ ${match.level_id}: ${match.level_name}` : null;
+    };
+
+    const ethicsRadar = radarRes.rows.map((row) => {
+      const score = Math.round(parseFloat(row.avg_score));
+      return {
+        subject: row.principle_name,
+        score,
+        systemAverage: systemAvgByPrinciple[row.principle_id] ?? 0,
+        levelName: levelNameForScore(score),
+        fullMark: 100,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        project: projectData,
+        members: membersResult.rows,
+        ethicsRadar,
+      },
+    });
+  } catch (error) {
+    console.error("Admin View Project Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงข้อมูลโครงการ" });
+  }
+};
+
+// กิจกรรมล่าสุดในระบบ สำหรับหน้า Dashboard - อ่านจาก system_logs ตัวเดียวกับที่ bpp-support ดึงไปดู
+// (คนละ endpoint กับ /admin/system-logs ที่ล็อกด้วย X-Internal-Secret เพราะฝั่งนี้ให้ admin ที่ login
+// ผ่านหน้าเว็บเราเรียกดูเอง ไม่ใช่ server-to-server)
+exports.getRecentActivity = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, user_name, module, action, detail, created_at
+       FROM system_logs
+       ORDER BY created_at DESC
+       LIMIT 10`,
+    );
+    res.status(200).json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Recent Activity Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงกิจกรรมล่าสุด" });
   }
 };
