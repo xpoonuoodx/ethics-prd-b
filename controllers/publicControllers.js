@@ -244,3 +244,116 @@ exports.getDashboardStats = async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
+
+// พร็อกซีรูปภาพแม่แบบใบประกาศ (background/logo/signature) ให้ html2canvas อ่านพิกเซลได้
+// ปัญหาเดิม: รูปที่โฮสต์นอกโดเมนเรา (เช่น cdn.phototourl.com) ไม่ได้ส่ง header
+// Access-Control-Allow-Origin กลับมา ทำให้หน้าเว็บโชว์รูปได้ปกติ (แค่ paint ไม่ต้องขอ CORS)
+// แต่ html2canvas ต้องอ่านพิกเซลจริงตอนแปลงเป็น PDF เลยได้ภาพว่างเปล่า
+// จำกัดให้พร็อกซีได้เฉพาะ URL ที่ admin ตั้งค่าไว้ใน certificate_settings จริงเท่านั้น
+// กัน endpoint นี้ถูกใช้เป็นช่องทาง SSRF ไปยิง URL อื่นที่ไม่เกี่ยวข้อง
+exports.proxyImage = async (req, res) => {
+  const { url } = req.query;
+
+  if (!url || typeof url !== "string") {
+    return res.status(400).json({ message: "กรุณาระบุ url" });
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return res.status(400).json({ message: "url ไม่ถูกต้อง" });
+  }
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    return res.status(400).json({ message: "รองรับเฉพาะ http/https" });
+  }
+
+  try {
+    const allowedResult = await db.query(
+      `SELECT 1 FROM certificate_settings
+       WHERE background_url = $1 OR logo_url = $1 OR signature_url = $1
+       LIMIT 1`,
+      [url],
+    );
+    if (allowedResult.rows.length === 0) {
+      return res.status(403).json({ message: "ไม่อนุญาตให้พร็อกซี URL นี้" });
+    }
+
+    const upstream = await fetch(url);
+    if (!upstream.ok) {
+      return res.status(502).json({ message: "ดึงรูปภาพต้นทางไม่สำเร็จ" });
+    }
+
+    const contentType = upstream.headers.get("content-type") || "";
+    if (!contentType.startsWith("image/")) {
+      return res.status(415).json({ message: "URL นี้ไม่ใช่รูปภาพ" });
+    }
+
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.set({
+      "Content-Type": contentType,
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "public, max-age=3600",
+    });
+    res.send(buffer);
+  } catch (error) {
+    console.error("Proxy Image Error:", error);
+    res.status(502).json({ message: "ดึงรูปภาพต้นทางไม่สำเร็จ" });
+  }
+};
+
+// ตรวจสอบใบประกาศนียบัตรจากเลขที่ (สแกนจาก QR บนใบเซอร์) - เปิดสาธารณะ ไม่ต้อง login
+// เลขที่ต้องเป็นรูปแบบใหม่ (dev-2600001 ฯลฯ) เท่านั้น ใบเก่าก่อนมีระบบนี้ (cert_number เป็น NULL)
+// ยังไม่รองรับตรวจสอบผ่านหน้านี้ ตามที่ตกลงกันไว้ - เอาไว้ทำเพิ่มทีหลังได้ถ้าต้องการ
+// ส่งกลับเฉพาะข้อมูลที่โชว์อยู่บนตัวใบเซอร์เองอยู่แล้ว (ไม่มีอีเมล/คะแนนสอบ เพราะหน้านี้ไม่ต้อง login ใครก็เข้าดูได้)
+exports.verifyCertificate = async (req, res) => {
+  const { certNumber } = req.params;
+  if (!certNumber) {
+    return res.status(400).json({ success: false, message: "กรุณาระบุเลขที่ใบประกาศ" });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT
+         c.cert_number, c.issued_at,
+         p.first_name_th || ' ' || p.last_name_th AS user_name,
+         cs.course_name, cs.issuer_name, cs.signatory_name, cs.signatory_position
+       FROM certificates c
+       JOIN users u ON c.user_id = u.id
+       LEFT JOIN profiles p ON u.id = p.user_id
+       LEFT JOIN certificate_settings cs ON c.course_group = cs.course_group
+       WHERE c.cert_number = $1`,
+      [certNumber],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลใบประกาศนี้ในระบบ" });
+    }
+
+    const row = result.rows[0];
+    res.status(200).json({
+      success: true,
+      data: {
+        certNumber: row.cert_number,
+        userName: row.user_name,
+        courseName: row.course_name,
+        issuerName: row.issuer_name,
+        signatoryName: row.signatory_name,
+        signatoryPosition: row.signatory_position,
+        issuedDate: new Date(row.issued_at).toLocaleDateString("th-TH", {
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+          timeZone: "Asia/Bangkok",
+        }),
+      },
+    });
+  } catch (error) {
+    console.error("Verify Certificate Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการตรวจสอบใบประกาศ" });
+  }
+};

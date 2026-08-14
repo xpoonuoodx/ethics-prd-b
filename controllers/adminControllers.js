@@ -1772,17 +1772,27 @@ exports.deleteChapter = async (req, res) => {
 exports.getCertificates = async (req, res) => {
   try {
     const query = `
-      SELECT 
+      SELECT
         c.id AS "certId",
         c.course_group AS "courseGroup",
         c.issued_at AS "issuedAt",
+        c.cert_number AS "certNumber",
         p.first_name_th || ' ' || p.last_name_th AS "userName",
         p.email AS "userEmail",
-        o.org_name AS "orgName" -- แก้เป็น org_name ตามโครงสร้าง DB จริง
+        o.org_name AS "orgName", -- แก้เป็น org_name ตามโครงสร้าง DB จริง
+        cs.course_name AS "courseName",
+        cs.background_url AS "backgroundUrl",
+        cs.logo_url AS "logoUrl",
+        cs.signature_url AS "signatureUrl",
+        cs.signatory_name AS "signatoryName",
+        cs.signatory_position AS "signatoryPosition",
+        cs.issuer_name AS "issuerName",
+        cs.description AS "description"
       FROM certificates c
       JOIN users u ON c.user_id = u.id
       LEFT JOIN profiles p ON u.id = p.user_id
       LEFT JOIN organizations o ON u.organization_id = o.id
+      LEFT JOIN certificate_settings cs ON c.course_group = cs.course_group
       ORDER BY c.issued_at DESC
     `;
     const result = await db.query(query);
@@ -1852,12 +1862,14 @@ exports.saveCertificateSettings = async (req, res) => {
   try {
     const {
       course_group,
-      course_name, // <--- 1. เพิ่มตัวแปรนี้
+      course_name,
       background_url,
       logo_url,
       signatory_name,
       signatory_position,
       signature_url,
+      issuer_name,
+      description,
     } = req.body;
 
     if (!course_group) {
@@ -1867,28 +1879,32 @@ exports.saveCertificateSettings = async (req, res) => {
     }
 
     const upsertQuery = `
-      INSERT INTO certificate_settings 
-        (course_group, course_name, background_url, logo_url, signatory_name, signatory_position, signature_url) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7)  -- <--- 2. เพิ่ม $2 และขยับเลขที่เหลือ
+      INSERT INTO certificate_settings
+        (course_group, course_name, background_url, logo_url, signatory_name, signatory_position, signature_url, issuer_name, description)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       ON CONFLICT (course_group)
       DO UPDATE SET
-        course_name = EXCLUDED.course_name, -- <--- 3. ให้มันอัปเดตค่าได้
+        course_name = EXCLUDED.course_name,
         background_url = EXCLUDED.background_url,
         logo_url = EXCLUDED.logo_url,
         signatory_name = EXCLUDED.signatory_name,
         signatory_position = EXCLUDED.signatory_position,
         signature_url = EXCLUDED.signature_url,
+        issuer_name = EXCLUDED.issuer_name,
+        description = EXCLUDED.description,
         updated_at = CURRENT_TIMESTAMP
     `;
 
     await db.query(upsertQuery, [
       parseInt(course_group),
-      course_name, // <--- 4. ใส่ค่าส่งไปใน Array
+      course_name,
       background_url,
       logo_url,
       signatory_name,
       signatory_position,
       signature_url,
+      issuer_name,
+      description,
     ]);
 
     res
