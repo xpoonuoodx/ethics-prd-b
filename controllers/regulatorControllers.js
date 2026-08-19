@@ -1,4 +1,5 @@
 const db = require("../db");
+const { generateCertNumber } = require("../utils/certNumber");
 const bcrypt = require("bcryptjs");
 const { isValidUsername, isValidPassword } = require("../utils/validators");
 
@@ -1087,20 +1088,30 @@ exports.submitRegulatorTestResult = async (req, res) => {
     if (isAllPassed) {
       const courseGroupId = targetGroup;
       let certId;
+      let certNumber;
 
       const checkCert = await db.query(
-        `SELECT id FROM certificates WHERE user_id = $1 AND course_group = $2`,
+        `SELECT id, cert_number FROM certificates WHERE user_id = $1 AND course_group = $2`,
         [userId, courseGroupId],
       );
 
       if (checkCert.rows.length === 0) {
+        // ต้องรู้ user_type ของคนที่กำลังจะออกใบเซอร์ให้ ก่อนเลือก prefix เลขที่ (dev/res/reg/pol/ser/usr/gen)
+        const userTypeResult = await db.query(
+          `SELECT user_type FROM users WHERE id = $1`,
+          [userId],
+        );
+        certNumber = await generateCertNumber(userTypeResult.rows[0]?.user_type);
+
         const insertCert = await db.query(
-          `INSERT INTO certificates (user_id, course_group, issued_at) VALUES ($1, $2, CURRENT_TIMESTAMP) RETURNING id`,
-          [userId, courseGroupId],
+          `INSERT INTO certificates (user_id, course_group, issued_at, cert_number)
+           VALUES ($1, $2, CURRENT_TIMESTAMP, $3) RETURNING id`,
+          [userId, courseGroupId, certNumber],
         );
         certId = insertCert.rows[0].id;
       } else {
         certId = checkCert.rows[0].id;
+        certNumber = checkCert.rows[0].cert_number;
       }
 
       const settingsQuery = await db.query(
@@ -1109,6 +1120,7 @@ exports.submitRegulatorTestResult = async (req, res) => {
       );
       certSettings = settingsQuery.rows[0] || {};
       certSettings.certId = certId;
+      certSettings.certNumber = certNumber;
     }
 
     res.status(200).json({
@@ -1253,7 +1265,9 @@ exports.generateRegulatorToolResult = async (req, res) => {
     const resultSnapshot = {
       userType: userType,
       matchedRole: roleStr,
-      date: new Date().toLocaleDateString("th-TH"),
+      date: new Date().toLocaleDateString("th-TH", {
+        timeZone: "Asia/Bangkok",
+      }),
       maturity: matInfo.rows[0],
       impact: impactInfo,
       principles: prinInfo.rows,
@@ -1336,9 +1350,10 @@ exports.getRegulatorCertificates = async (req, res) => {
 
     const certQuery = `
       SELECT
-        c.id as cert_id, c.course_group, c.issued_at,
+        c.id as cert_id, c.course_group, c.issued_at, c.cert_number,
         cs.course_name, cs.signatory_name, cs.signatory_position,
-        cs.background_url, cs.logo_url, cs.signature_url
+        cs.background_url, cs.logo_url, cs.signature_url,
+        cs.issuer_name, cs.description
       FROM certificates c
       LEFT JOIN certificate_settings cs ON c.course_group = cs.course_group
       WHERE c.user_id = $1
@@ -1369,16 +1384,20 @@ exports.getRegulatorCertificates = async (req, res) => {
 
         return {
           certId: cert.cert_id,
+          certNumber: cert.cert_number,
           course_name: cert.course_name || "AI Ethics Management",
           signatory_name: cert.signatory_name,
           signatory_position: cert.signatory_position,
           background_url: cert.background_url,
           logo_url: cert.logo_url,
           signature_url: cert.signature_url,
+          issuer_name: cert.issuer_name,
+          description: cert.description,
           passDate: new Date(cert.issued_at).toLocaleDateString("th-TH", {
             year: "numeric",
             month: "long",
             day: "numeric",
+            timeZone: "Asia/Bangkok",
           }),
           score: totalTestableChapters,
           totalQuestions: totalTestableChapters,
