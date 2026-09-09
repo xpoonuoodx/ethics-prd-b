@@ -11,7 +11,7 @@ const publicRoutes = require("./routes/publicRoutes");
 // const homeRoutes = require('./routes/homeRoutes')
 
 const app = express();
-
+app.set('trust proxy', 1);
 /**
  * @swagger
  * tags:
