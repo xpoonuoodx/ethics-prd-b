@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const { swaggerUi, swaggerSpec } = require("./config/swagger");
 
 const authRoutes = require("./routes/authRoutes");
@@ -11,7 +12,12 @@ const publicRoutes = require("./routes/publicRoutes");
 // const homeRoutes = require('./routes/homeRoutes')
 
 const app = express();
-app.set('trust proxy', 1);
+
+// อยู่หลัง reverse proxy ของ Vercel เสมอ ถ้าไม่ตั้งค่านี้ req.ip จะเป็น IP ของ proxy
+// เหมือนกันทุก request ทำให้ rate limiter ทุกตัวที่ key ด้วย IP (login/register/forgot-password/
+// reset-password/verify-certificate) นับผู้ใช้ทุกคนรวมเป็นถังเดียวกัน ใช้งานไม่ได้จริง
+app.set("trust proxy", 1);
+
 /**
  * @swagger
  * tags:
@@ -46,6 +52,10 @@ app.use(
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
+// เปิดให้เข้าถึงไฟล์รูปที่อัปโหลดไว้ (เช่นรูปโปรไฟล์) ผ่าน URL ตรง ๆ เช่น
+// http://<backend>/uploads/profile-images/<ชื่อไฟล์> - ไฟล์จริงเก็บอยู่ที่ ./uploads บน disk
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
 // Swagger documentation
 app.use(
   "/api-docs",
@@ -55,7 +65,7 @@ app.use(
 //ดีพอยเวอรชันใหม่ 2
 // Routes
 // app.use('/', homeRoutes);
-app.use('/public', publicRoutes);
+app.use("/public", publicRoutes);
 app.use("/auth", authRoutes);
 app.use("/user", userRoutes);
 app.use("/admin", adminRoutes);
@@ -67,7 +77,9 @@ app.use("/regulator", regulatorRoutes);
 // (ครอบคลุมทั้ง error จาก CORS middleware ด้านบนและ error อื่นๆ ที่ไม่ถูกจับใน controller)
 app.use((err, req, res, next) => {
   if (err && err.message === "Not allowed by CORS") {
-    return res.status(403).json({ message: "Origin นี้ไม่ได้รับอนุญาตให้เข้าถึง API" });
+    return res
+      .status(403)
+      .json({ message: "Origin นี้ไม่ได้รับอนุญาตให้เข้าถึง API" });
   }
   console.error("Unhandled Error:", err);
   res.status(500).json({ message: "เกิดข้อผิดพลาดจากเซิร์ฟเวอร์" });

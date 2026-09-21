@@ -183,4 +183,20 @@ router.get(
   adminControllers.getRecentActivity,
 );
 
+// หน้า "ตั้งค่าระบบ"
+router.get("/settings", verifyToken, adminControllers.getSettings);
+router.put("/settings", verifyToken, adminControllers.updateSettings);
+router.put(
+  "/change-password",
+  verifyToken,
+  adminControllers.changeOwnPassword,
+);
+router.get("/list-admins", verifyToken, adminControllers.getAdmins);
+router.post("/add-admin", verifyToken, adminControllers.addAdmin);
+router.put(
+  "/toggle-admin/:id",
+  verifyToken,
+  adminControllers.toggleAdminStatus,
+);
+
 module.exports = router;

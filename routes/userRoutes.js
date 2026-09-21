@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const userControllers = require("../controllers/userControllers");
 const { verifyToken } = require("../middlewares/authMiddlewares");
+const { uploadProfileImageMiddleware } = require("../utils/uploadMiddleware");
 
 router.get("/dashboard/:id", verifyToken, userControllers.getUserDashboard);
 router.get("/classroom/:id", verifyToken, userControllers.getUserClassroom);
@@ -40,6 +41,16 @@ router.get(
   "/component-activities/:componentId",
   verifyToken,
   userControllers.getComponentActivitiesList,
+);
+
+// เส้นทางหน้า "ข้อมูลส่วนตัว" ของตัวเอง
+router.get("/profile", verifyToken, userControllers.getUserProfile);
+router.put("/profile", verifyToken, userControllers.updateUserProfile);
+router.post(
+  "/profile-image",
+  verifyToken,
+  uploadProfileImageMiddleware,
+  userControllers.uploadUserProfileImage,
 );
 
 module.exports = router;

@@ -1,10 +1,23 @@
+const fs = require("fs");
+const path = require("path");
 const db = require("../db");
 const { generateCertNumber } = require("../utils/certNumber");
+const { getTargetGroupFromUserType } = require("../utils/targetGroup");
+const { getAppSettings } = require("../utils/appSettings");
+const { isValidPhone } = require("../utils/validators");
+const { UPLOAD_DIR } = require("../utils/uploadMiddleware");
 
 // --- GET USER DASHBOARD DATA ---
 exports.getUserDashboard = async (req, res) => {
   try {
     const userId = req.params.id;
+
+    // กันไม่ให้ user คนอื่นเปลี่ยนเลข id ใน URL แล้วดูแดชบอร์ดของคนอื่นได้ (IDOR)
+    if (parseInt(userId, 10) !== (req.user.account_id || req.user.id)) {
+      return res
+        .status(403)
+        .json({ success: false, message: "ไม่มีสิทธิ์เข้าถึงข้อมูลนี้" });
+    }
 
     // 1. ดึงข้อมูลรายละเอียดผู้ใช้ สังกัดองค์กร และโปรเจค
     const userQuery = `
@@ -63,16 +76,30 @@ exports.getUserDashboard = async (req, res) => {
     const statsResult = await db.query(statsQuery, [userId]);
     const summaryStats = statsResult.rows[0];
 
-    // 4. คำนวณเปอร์เซ็นต์ความคืบหน้าหลักสูตร
+    // 4. คำนวณเปอร์เซ็นต์ความคืบหน้าหลักสูตร (ต้องนับเฉพาะบทที่ผ่านของหลักสูตรตัวเองเท่านั้น
+    // แยกจาก summaryStats.passedChapters ด้านบนซึ่งเป็นยอดรวมทุกหลักสูตรที่เคยสอบผ่าน (ใช้โชว์
+    // การ์ดสรุปรวม "บทเรียนที่สอบผ่าน" เฉยๆ) - ถ้าใช้ยอดรวมมาหารจะได้ % เกิน 100 ได้ตอนที่เปิดโหมด
+    // "ทำแบบทดสอบข้ามหลักสูตร" แล้วผู้ใช้ไปสอบผ่านหลักสูตรอื่นเพิ่มด้วย)
     const totalChaptersQuery = `SELECT COUNT(*) AS total FROM chapters WHERE target_group = $1 AND status = 'Active'`;
     const totalChaptersResult = await db.query(totalChaptersQuery, [
       targetGroup,
     ]);
     const totalChapters = parseInt(totalChaptersResult.rows[0].total) || 0;
-    const passedChapters = parseInt(summaryStats.passedChapters) || 0;
+    const ownPassedQuery = `
+      SELECT COUNT(*) AS "ownPassedChapters"
+      FROM user_progress up
+      JOIN chapters c ON up.chapter_id = c.id
+      WHERE up.user_id = $1 AND up.is_passed = true AND c.target_group = $2
+    `;
+    const ownPassedResult = await db.query(ownPassedQuery, [
+      userId,
+      targetGroup,
+    ]);
+    const ownPassedChapters =
+      parseInt(ownPassedResult.rows[0].ownPassedChapters) || 0;
     const progressPercentage =
       totalChapters > 0
-        ? Math.round((passedChapters / totalChapters) * 100)
+        ? Math.round((ownPassedChapters / totalChapters) * 100)
         : 0;
 
     // 5. ดึงข้อมูลองค์ประกอบจริยธรรม (กรองเฉพาะของ User Type นั้นๆ)
@@ -95,6 +122,34 @@ exports.getUserDashboard = async (req, res) => {
       componentRole,
     ]);
 
+    // ถ้า admin เปิดโหมด "ทำแบบทดสอบข้ามหลักสูตร" ไว้ คำนวณ % ความคืบหน้าของอีก 2 หลักสูตร
+    // ที่ไม่ใช่ของตัวเองมาด้วย เพื่อให้หน้า Dashboard โชว์ progress bar ได้ครบทั้ง 3 การ์ด
+    // (ปิดโหมดนี้ = เหมือนเดิมทุกอย่าง โชว์ progress แค่การ์ดของหลักสูตรตัวเอง)
+    const { allow_cross_track_testing } = await getAppSettings();
+    let groupProgress = null;
+    if (allow_cross_track_testing) {
+      const allGroupsStatsQuery = `
+        SELECT
+          c.target_group AS "targetGroup",
+          COUNT(*) AS "totalChapters",
+          COUNT(CASE WHEN up.is_passed = true THEN 1 END) AS "passedChapters"
+        FROM chapters c
+        LEFT JOIN user_progress up ON up.chapter_id = c.id AND up.user_id = $1
+        WHERE c.status = 'Active'
+        GROUP BY c.target_group
+      `;
+      const allGroupsResult = await db.query(allGroupsStatsQuery, [userId]);
+      groupProgress = { 1: 0, 2: 0, 3: 0 };
+      allGroupsResult.rows.forEach((row) => {
+        const total = parseInt(row.totalChapters) || 0;
+        const passed = parseInt(row.passedChapters) || 0;
+        groupProgress[row.targetGroup] =
+          total > 0 ? Math.round((passed / total) * 100) : 0;
+      });
+      // แถวของหลักสูตรตัวเองใช้ค่าที่คำนวณไว้แล้วด้านบนเป๊ะ ๆ (กันเคสปัดเศษไม่ตรงกันเล็กน้อย)
+      groupProgress[targetGroup] = progressPercentage;
+    }
+
     res.status(200).json({
       success: true,
       data: {
@@ -107,11 +162,13 @@ exports.getUserDashboard = async (req, res) => {
         projects: userData.projects || "ยังไม่มีโครงการที่รับผิดชอบ",
         stats: {
           totalAttempts: parseInt(summaryStats.totalAttempts),
-          passedChapters: passedChapters,
+          passedChapters: parseInt(summaryStats.passedChapters) || 0,
           certificates: parseInt(summaryStats.certificatesCount),
           progressPercentage: progressPercentage,
         },
         radarData: radarResult.rows,
+        allowCrossTrackTesting: allow_cross_track_testing,
+        groupProgress,
       },
     });
   } catch (error) {
@@ -130,60 +187,59 @@ exports.getUserClassroom = async (req, res) => {
   try {
     const userId = req.params.id;
 
-    // 1. ดึงประเภทของผู้ใช้เพื่อนำไปหากลุ่มหลักสูตร
-    const userQuery = `SELECT user_type FROM users WHERE id = $1`;
-    const userResult = await db.query(userQuery, [userId]);
-
-    if (userResult.rows.length === 0) {
+    // กันไม่ให้ user คนอื่นเปลี่ยนเลข id ใน URL แล้วดูห้องเรียนของคนอื่นได้ (IDOR)
+    if (parseInt(userId, 10) !== (req.user.account_id || req.user.id)) {
       return res
-        .status(404)
-        .json({ success: false, message: "ไม่พบข้อมูลผู้ใช้งาน" });
+        .status(403)
+        .json({ success: false, message: "ไม่มีสิทธิ์เข้าถึงข้อมูลนี้" });
     }
 
-    const typeStr = (userResult.rows[0].user_type || "").toLowerCase();
-    let targetGroup = 3; // ค่าเริ่มต้น (User)
-    let courseTitle = "หลักสูตรสำหรับผู้ใช้งานทั่วไป (General User)";
-    let courseDesc =
-      "สร้างความตระหนักรู้และเข้าใจผลกระทบของการใช้งาน AI ในชีวิตประจำวัน";
+    // เรียนได้ทุกหลักสูตรไม่ว่าจะเป็น user_type ไหน (การทำข้อสอบเท่านั้นที่ยังจำกัดตาม
+    // user_type เดิม ดู getUserTestsList/submitTestResult) เลยดึงบทเรียนทุกกลุ่มมาให้หมด
+    // แล้วจัดเป็นชุดหลักสูตรแยกตามกลุ่มไว้ให้หน้าบ้าน render เป็นหัวข้อ ๆ
+    const COURSE_INFO = {
+      1: {
+        courseTitle: "หลักสูตรสำหรับผู้วางนโยบาย (Regulator)",
+        courseDesc:
+          "เรียนรู้แนวทางการกำกับดูแลและการสร้างนโยบาย AI ที่สอดคล้องกับหลักจริยธรรมระดับชาติ",
+      },
+      2: {
+        courseTitle:
+          "หลักสูตรสำหรับนักพัฒนา (Researcher, Developer, Service Provider)",
+        courseDesc:
+          "เรียนรู้การออกแบบและพัฒนาโมเดล AI ที่มีความโปร่งใส อธิบายได้ และลดความลำเอียง",
+      },
+      3: {
+        courseTitle: "หลักสูตรสำหรับผู้ใช้งานทั่วไป (General User)",
+        courseDesc:
+          "สร้างความตระหนักรู้และเข้าใจผลกระทบของการใช้งาน AI ในชีวิตประจำวัน",
+      },
+    };
 
-    if (typeStr.includes("regulator") || typeStr.includes("policy")) {
-      targetGroup = 1;
-      courseTitle = "หลักสูตรสำหรับผู้วางนโยบาย (Regulator)";
-      courseDesc =
-        "เรียนรู้แนวทางการกำกับดูแลและการสร้างนโยบาย AI ที่สอดคล้องกับหลักจริยธรรมระดับชาติ";
-    } else if (
-      typeStr.includes("provider") ||
-      typeStr.includes("developer") ||
-      typeStr.includes("researcher")
-    ) {
-      targetGroup = 2;
-      courseTitle = "หลักสูตรสำหรับนักพัฒนา (Researcher, Developer, Service Provider)";
-      courseDesc =
-        "เรียนรู้การออกแบบและพัฒนาโมเดล AI ที่มีความโปร่งใส อธิบายได้ และลดความลำเอียง";
-    }
-
-    // 2. ดึงรายการบทเรียนทั้งหมดในกลุ่มนั้น พร้อม JOIN ผลการสอบของผู้ใช้
     const chaptersQuery = `
-      SELECT 
+      SELECT
         c.id AS "chapterId",
         c.title AS "chapterTitle",
+        c.target_group AS "targetGroup",
         COALESCE(up.is_passed, false) AS "isPassed",
         up.score AS "userScore",
         (SELECT COUNT(*) FROM questions q WHERE q.chapter_id = c.id) AS "totalQuestions"
       FROM chapters c
       LEFT JOIN user_progress up ON c.id = up.chapter_id AND up.user_id = $1
-      WHERE c.target_group = $2 AND c.status = 'Active'
-      ORDER BY c.id ASC
+      WHERE c.status = 'Active'
+      ORDER BY c.target_group ASC, c.id ASC
     `;
-    const chaptersResult = await db.query(chaptersQuery, [userId, targetGroup]);
+    const chaptersResult = await db.query(chaptersQuery, [userId]);
+
+    const courses = [1, 2, 3].map((group) => ({
+      targetGroup: group,
+      ...COURSE_INFO[group],
+      chapters: chaptersResult.rows.filter((row) => row.targetGroup === group),
+    }));
 
     res.status(200).json({
       success: true,
-      data: {
-        courseTitle,
-        courseDesc,
-        chapters: chaptersResult.rows,
-      },
+      data: { courses },
     });
   } catch (error) {
     console.error("Get User Classroom Error:", error);
@@ -201,9 +257,9 @@ exports.getChapterById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // 💡 แก้ไขแล้ว: ดึงเฉพาะ title และ video_url (ไม่มี content แล้วเพื่อป้องกัน Error)
+    // 💡 แก้ไขแล้ว: ดึงเฉพาะ title, video_url และ target_group (ไม่มี content แล้วเพื่อป้องกัน Error)
     const result = await db.query(
-      "SELECT title, video_url FROM chapters WHERE id = $1",
+      "SELECT title, video_url, target_group FROM chapters WHERE id = $1",
       [id],
     );
 
@@ -213,7 +269,31 @@ exports.getChapterById = async (req, res) => {
         .json({ success: false, message: "ไม่พบข้อมูลบทเรียน" });
     }
 
-    res.status(200).json({ success: true, data: result.rows[0] });
+    // เรียนดูวิดีโอได้ทุกหลักสูตร แต่ทำข้อสอบได้แค่หลักสูตรของ user_type ตัวเองเท่านั้น
+    // เลยต้องบอกหน้าบ้านว่าบทนี้ควรมีปุ่ม "เข้าสู่แบบทดสอบ" ให้กดหรือไม่
+    const userId = req.user.account_id || req.user.id;
+    const userResult = await db.query(
+      "SELECT user_type FROM users WHERE id = $1",
+      [userId],
+    );
+    const ownTargetGroup = getTargetGroupFromUserType(
+      userResult.rows[0]?.user_type,
+    );
+
+    // ถ้า admin เปิดโหมด "ทำแบบทดสอบข้ามหลักสูตร" ไว้ ให้เข้าทำข้อสอบได้ทุกบทโดยไม่ต้องเช็ก
+    // target_group ตัวเองอีกต่อไป (ค่า default ปิดอยู่ = พฤติกรรมเดิมทุกอย่าง)
+    const { allow_cross_track_testing } = await getAppSettings();
+
+    const chapter = result.rows[0];
+    res.status(200).json({
+      success: true,
+      data: {
+        title: chapter.title,
+        video_url: chapter.video_url,
+        canTakeTest:
+          allow_cross_track_testing || chapter.target_group === ownTargetGroup,
+      },
+    });
   } catch (error) {
     console.error("Get Chapter Error:", error);
     res
@@ -226,6 +306,13 @@ exports.getUserTestsList = async (req, res) => {
   try {
     const userId = req.params.id;
 
+    // กันไม่ให้ user คนอื่นเปลี่ยนเลข id ใน URL แล้วดูรายการแบบทดสอบของคนอื่นได้ (IDOR)
+    if (parseInt(userId, 10) !== (req.user.account_id || req.user.id)) {
+      return res
+        .status(403)
+        .json({ success: false, message: "ไม่มีสิทธิ์เข้าถึงข้อมูลนี้" });
+    }
+
     // หา User Type เพื่อระบุ Target Group
     const userQuery = `SELECT user_type FROM users WHERE id = $1`;
     const userResult = await db.query(userQuery, [userId]);
@@ -236,20 +323,24 @@ exports.getUserTestsList = async (req, res) => {
         .json({ success: false, message: "ไม่พบข้อมูลผู้ใช้งาน" });
     }
 
-    const typeStr = (userResult.rows[0].user_type || "").toLowerCase();
-    let targetGroup = 3;
-    if (typeStr.includes("regulator") || typeStr.includes("policy"))
-      targetGroup = 1;
-    else if (
-      typeStr.includes("provider") ||
-      typeStr.includes("developer") ||
-      typeStr.includes("researcher")
-    )
-      targetGroup = 2;
+    const ownTargetGroup = getTargetGroupFromUserType(
+      userResult.rows[0].user_type,
+    );
+
+    // ถ้า admin เปิดโหมด "ทำแบบทดสอบข้ามหลักสูตร" ไว้ และหน้าบ้านระบุ targetGroup มาทาง query
+    // (เช่นจาก tab เลือกหลักสูตร) ให้ใช้ค่านั้นแทน ไม่งั้น default เป็นหลักสูตรของตัวเองเหมือนเดิม
+    const { allow_cross_track_testing } = await getAppSettings();
+    let targetGroup = ownTargetGroup;
+    if (allow_cross_track_testing && req.query.targetGroup) {
+      const requestedGroup = parseInt(req.query.targetGroup, 10);
+      if ([1, 2, 3].includes(requestedGroup)) {
+        targetGroup = requestedGroup;
+      }
+    }
 
     // ดึงบทเรียนและผลคะแนนสอบ
     const testQuery = `
-      SELECT 
+      SELECT
         c.id AS "chapterId",
         c.title AS "chapterTitle",
         c.passing_percentage AS "passingPercentage",
@@ -264,7 +355,15 @@ exports.getUserTestsList = async (req, res) => {
     `;
     const testResult = await db.query(testQuery, [userId, targetGroup]);
 
-    res.status(200).json({ success: true, data: testResult.rows });
+    res.status(200).json({
+      success: true,
+      data: testResult.rows,
+      meta: {
+        targetGroup,
+        ownTargetGroup,
+        allowCrossTrackTesting: allow_cross_track_testing,
+      },
+    });
   } catch (error) {
     console.error("Get Tests List Error:", error);
     res.status(500).json({
@@ -279,13 +378,33 @@ exports.getTestQuestions = async (req, res) => {
     const { chapterId } = req.params;
 
     // ดึงข้อมูลบทเรียน
-    const chapterQuery = `SELECT id, title, passing_percentage FROM chapters WHERE id = $1`;
+    const chapterQuery = `SELECT id, title, passing_percentage, target_group FROM chapters WHERE id = $1`;
     const chapterResult = await db.query(chapterQuery, [chapterId]);
 
     if (chapterResult.rows.length === 0) {
       return res
         .status(404)
         .json({ success: false, message: "ไม่พบแบบทดสอบนี้" });
+    }
+
+    // เรียนดูวิดีโอได้ทุกหลักสูตร แต่ทำข้อสอบได้แค่หลักสูตรของ user_type ตัวเองเท่านั้น
+    const ownUserId = req.user.account_id || req.user.id;
+    const ownUserResult = await db.query(
+      "SELECT user_type FROM users WHERE id = $1",
+      [ownUserId],
+    );
+    const ownTargetGroup = getTargetGroupFromUserType(
+      ownUserResult.rows[0]?.user_type,
+    );
+    const { allow_cross_track_testing } = await getAppSettings();
+    if (
+      !allow_cross_track_testing &&
+      chapterResult.rows[0].target_group !== ownTargetGroup
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "ไม่สามารถทำแบบทดสอบของหลักสูตรอื่นได้",
+      });
     }
 
     // ดึงคำถามจาก DB ตาม Schema จริงของคุณ
@@ -298,10 +417,6 @@ exports.getTestQuestions = async (req, res) => {
       const optionsArray =
         typeof q.options === "string" ? JSON.parse(q.options) : q.options;
 
-      // หา Text ของคำตอบที่ถูกต้องก่อนสลับตำแหน่ง
-      const correctIndexDB = parseInt(q.correct_answer, 10) || 0;
-      const correctText = optionsArray[correctIndexDB];
-
       // สลับตำแหน่งช้อยส์ (Fisher-Yates Shuffle)
       let shuffledOptions = [...optionsArray];
       for (let i = shuffledOptions.length - 1; i > 0; i--) {
@@ -312,14 +427,14 @@ exports.getTestQuestions = async (req, res) => {
         ];
       }
 
-      // หา Index ใหม่ของคำตอบที่ถูกต้องหลังจากสลับแล้ว
-      const newCorrectIndex = shuffledOptions.indexOf(correctText);
+      // หมายเหตุ: เจตนาไม่ส่ง index คำตอบที่ถูกกลับไปที่ client อีกต่อไป (เดิมส่ง `answer` ไปด้วย
+      // ทำให้เปิด devtools ดูเฉลยก่อนตอบได้) การตรวจคำตอบทั้งหมดต้องทำฝั่งเซิร์ฟเวอร์เท่านั้น
+      // ดู submitTestResult ด้านล่าง
 
       return {
         id: q.id,
         q: q.question_text,
         options: shuffledOptions,
-        answer: newCorrectIndex,
       };
     });
 
@@ -340,10 +455,74 @@ exports.getTestQuestions = async (req, res) => {
 
 exports.submitTestResult = async (req, res) => {
   try {
-    const { userId, chapterId, score, totalQuestions, passingPercentage } =
-      req.body;
+    // ผู้ใช้ต้องเป็นเจ้าของผลสอบนี้เท่านั้น (ห้ามรับ userId จาก body เพราะปลอมส่งแทนคนอื่นได้)
+    const userId = req.user.account_id || req.user.id;
+    const { chapterId, answers } = req.body;
 
-    const scorePercentage = (score / totalQuestions) * 100;
+    if (!chapterId || !Array.isArray(answers)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "ข้อมูลคำตอบไม่ถูกต้อง" });
+    }
+
+    // ดึงเกณฑ์ผ่าน + กลุ่มหลักสูตรจาก DB เอง (ห้ามรับจาก body เพราะปลอมเกณฑ์ผ่านให้ตัวเองได้)
+    const chapterQuery = await db.query(
+      `SELECT passing_percentage, target_group FROM chapters WHERE id = $1`,
+      [chapterId],
+    );
+    if (chapterQuery.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบแบบทดสอบนี้" });
+    }
+    const passingPercentage = chapterQuery.rows[0].passing_percentage;
+    const targetGroup = chapterQuery.rows[0].target_group;
+
+    // ทำข้อสอบได้เฉพาะบทเรียนที่ตรงกับ user_type ตัวเองเท่านั้น (เรียนดูวิดีโอได้ทุกหลักสูตร
+    // แต่ทำข้อสอบ/รับใบเซอร์ได้แค่หลักสูตรของตัวเอง กันยิง endpoint นี้ตรง ๆ ข้ามหลักสูตร) - ยกเว้น
+    // admin เปิดโหมด "ทำแบบทดสอบข้ามหลักสูตร" ไว้ที่หน้าตั้งค่าระบบ (ค่า default ปิดอยู่)
+    const userTypeResult = await db.query(
+      `SELECT user_type FROM users WHERE id = $1`,
+      [userId],
+    );
+    const userType = userTypeResult.rows[0]?.user_type;
+    const { allow_cross_track_testing } = await getAppSettings();
+    if (
+      !allow_cross_track_testing &&
+      targetGroup !== getTargetGroupFromUserType(userType)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "ไม่สามารถทำแบบทดสอบของหลักสูตรอื่นได้",
+      });
+    }
+
+    // ดึงเฉลยจริงจาก DB มาตรวจเอง (ห้ามเชื่อคะแนนที่ client คำนวณมา ป้องกันปลอมผลสอบ/ใบเซอร์)
+    const questionsResult = await db.query(
+      `SELECT id, options, correct_answer FROM questions WHERE chapter_id = $1`,
+      [chapterId],
+    );
+    const totalQuestions = questionsResult.rows.length;
+
+    // สลับช้อยส์ตอนโหลดคำถามทุกครั้ง เลยอ้างอิง index เดิมไม่ได้ - เทียบด้วยข้อความคำตอบที่เลือกแทน
+    const answerMap = new Map(
+      answers
+        .filter((a) => a && a.questionId !== undefined)
+        .map((a) => [String(a.questionId), a.selectedOption]),
+    );
+
+    let score = 0;
+    for (const q of questionsResult.rows) {
+      const optionsArray =
+        typeof q.options === "string" ? JSON.parse(q.options) : q.options;
+      const correctText = optionsArray[parseInt(q.correct_answer, 10) || 0];
+      if (answerMap.get(String(q.id)) === correctText) {
+        score += 1;
+      }
+    }
+
+    const scorePercentage =
+      totalQuestions > 0 ? (score / totalQuestions) * 100 : 0;
     const isPassed = scorePercentage >= passingPercentage;
 
     const checkQuery = `SELECT * FROM user_progress WHERE user_id = $1 AND chapter_id = $2`;
@@ -375,12 +554,6 @@ exports.submitTestResult = async (req, res) => {
       `;
       await db.query(insertQuery, [userId, chapterId, score, isPassed]);
     }
-
-    const targetQuery = await db.query(
-      `SELECT target_group FROM chapters WHERE id = $1`,
-      [chapterId],
-    );
-    const targetGroup = targetQuery.rows[0].target_group;
 
     const totalChaptersResult = await db.query(
       `
@@ -422,12 +595,9 @@ exports.submitTestResult = async (req, res) => {
       );
 
       if (checkCert.rows.length === 0) {
-        // ต้องรู้ user_type ของคนที่กำลังจะออกใบเซอร์ให้ ก่อนเลือก prefix เลขที่ (dev/res/reg/pol/ser/usr/gen)
-        const userTypeResult = await db.query(
-          `SELECT user_type FROM users WHERE id = $1`,
-          [userId],
-        );
-        certNumber = await generateCertNumber(userTypeResult.rows[0]?.user_type);
+        // เลือก prefix เลขที่ (dev/res/reg/pol/ser/usr/gen) จาก user_type ที่ดึงไว้แล้วด้านบน
+        // ถ้าตรงกับหลักสูตรที่สอบผ่านอยู่แล้ว หรือจาก target_group ของหลักสูตรเองถ้าสอบข้ามหลักสูตร
+        certNumber = await generateCertNumber(userType, targetGroup);
 
         const insertCert = await db.query(
           `INSERT INTO certificates (user_id, course_group, issued_at, cert_number)
@@ -522,7 +692,9 @@ exports.getToolSetupData = async (req, res) => {
 // ==========================================
 exports.generateToolResult = async (req, res) => {
   try {
-    const { userId, maturityId, principleIds } = req.body;
+    // ผู้ใช้ต้องสร้างผลประเมินให้ตัวเองเท่านั้น (ห้ามรับ userId จาก body เพราะสร้างแทนคนอื่นได้)
+    const userId = req.user.account_id || req.user.id;
+    const { maturityId, principleIds } = req.body;
 
     // 1. ดึงข้อมูล User Type + หน่วยงานสังกัด
     const userResult = await db.query(
@@ -646,6 +818,13 @@ exports.getUserToolsHistoryList = async (req, res) => {
   try {
     const userId = req.params.id;
 
+    // กันไม่ให้ user คนอื่นเปลี่ยนเลข id ใน URL แล้วดูประวัติประเมินของคนอื่นได้ (IDOR)
+    if (parseInt(userId, 10) !== (req.user.account_id || req.user.id)) {
+      return res
+        .status(403)
+        .json({ success: false, message: "ไม่มีสิทธิ์เข้าถึงข้อมูลนี้" });
+    }
+
     // ดึงข้อมูล id ประวัติ และดึงก้อนข้อมูลจากฟิลด์ result_data ออกมาตรงๆ
     const query = `
       SELECT id, result_data 
@@ -677,7 +856,17 @@ exports.getUserToolsHistoryList = async (req, res) => {
 exports.deleteUserToolHistory = async (req, res) => {
   try {
     const { id } = req.params;
-    await db.query("DELETE FROM user_tools_history WHERE id = $1", [id]);
+    const userId = req.user.account_id || req.user.id;
+    // เช็ค user_id คู่กับ id เสมอ กันลบประวัติของคนอื่น (ไล่เลข id) ได้
+    const result = await db.query(
+      "DELETE FROM user_tools_history WHERE id = $1 AND user_id = $2",
+      [id, userId],
+    );
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบประวัติการประเมินนี้" });
+    }
     res
       .status(200)
       .json({ success: true, message: "ลบประวัติการประเมินสำเร็จ" });
@@ -690,6 +879,13 @@ exports.deleteUserToolHistory = async (req, res) => {
 exports.getUserCertificates = async (req, res) => {
   try {
     const { userId } = req.params;
+
+    // กันไม่ให้ user คนอื่นเปลี่ยนเลข id ใน URL แล้วดูใบเซอร์ของคนอื่นได้ (IDOR)
+    if (parseInt(userId, 10) !== (req.user.account_id || req.user.id)) {
+      return res
+        .status(403)
+        .json({ success: false, message: "ไม่มีสิทธิ์เข้าถึงข้อมูลนี้" });
+    }
 
     // Join เอาตาราง certificate_settings มาด้วยเลย
     const certQuery = `
@@ -781,5 +977,143 @@ exports.getComponentActivitiesList = async (req, res) => {
       success: false,
       message: "เกิดข้อผิดพลาดในการดึงข้อมูล Activities",
     });
+  }
+};
+
+// ==========================================
+// หน้า "ข้อมูลส่วนตัว" (Profile) - ดูและแก้ไขข้อมูลของตัวเองเท่านั้น
+// ==========================================
+exports.getUserProfile = async (req, res) => {
+  try {
+    const userId = req.user.account_id || req.user.id;
+
+    const result = await db.query(
+      `SELECT
+         u.username, u.user_type, u.role,
+         p.first_name_th, p.last_name_th, p.email, p.mobile, p.user_code,
+         p.profile_image_url,
+         o.org_name
+       FROM users u
+       LEFT JOIN profiles p ON u.id = p.user_id
+       LEFT JOIN organizations o ON u.organization_id = o.id
+       WHERE u.id = $1`,
+      [userId],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลผู้ใช้งาน" });
+    }
+
+    res.status(200).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("Get User Profile Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงข้อมูลส่วนตัว" });
+  }
+};
+
+exports.updateUserProfile = async (req, res) => {
+  try {
+    const userId = req.user.account_id || req.user.id;
+    const { first_name, last_name, email, mobile } = req.body;
+
+    if (!first_name || !last_name || !email) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณากรอกชื่อ นามสกุล และอีเมลให้ครบถ้วน",
+      });
+    }
+    if (!isValidPhone(mobile)) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาระบุเบอร์โทรศัพท์ให้ถูกต้อง (ตัวเลข 9-10 หลัก ขึ้นต้นด้วย 0)",
+      });
+    }
+
+    // เช็คอีเมลซ้ำกับคนอื่น (ไม่นับแถวของตัวเอง) ก่อน UPDATE เพราะ profiles.email เป็น UNIQUE
+    const checkEmail = await db.query(
+      "SELECT id FROM profiles WHERE email = $1 AND user_id != $2",
+      [email, userId],
+    );
+    if (checkEmail.rows.length > 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "อีเมลนี้ถูกใช้งานโดยบัญชีอื่นแล้ว" });
+    }
+
+    const result = await db.query(
+      `UPDATE profiles
+       SET first_name_th = $1, last_name_th = $2, email = $3, mobile = $4, updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $5`,
+      [first_name, last_name, email, mobile, userId],
+    );
+
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลโปรไฟล์เพื่อทำการอัปเดต" });
+    }
+
+    res.status(200).json({ success: true, message: "บันทึกข้อมูลส่วนตัวสำเร็จ" });
+  } catch (error) {
+    console.error("Update User Profile Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูลส่วนตัว" });
+  }
+};
+
+// อัปโหลด/เปลี่ยนรูปโปรไฟล์ (แยก endpoint จาก updateUserProfile เพราะเป็น multipart/form-data
+// ไม่ใช่ JSON) - middleware อัปโหลดไฟล์อยู่ที่ routes/userRoutes.js
+exports.uploadUserProfileImage = async (req, res) => {
+  try {
+    const userId = req.user.account_id || req.user.id;
+
+    if (!req.file) {
+      return res
+        .status(400)
+        .json({ success: false, message: "กรุณาเลือกไฟล์รูปภาพ" });
+    }
+
+    const imageUrl = `${process.env.MYAPP_BACKEND_URL}/uploads/profile-images/${req.file.filename}`;
+
+    // ดึง URL รูปเดิมไว้ก่อน เผื่อต้องลบไฟล์เก่าทิ้งจาก disk หลังอัปเดตสำเร็จ (กันไฟล์ขยะสะสม)
+    const oldResult = await db.query(
+      "SELECT profile_image_url FROM profiles WHERE user_id = $1",
+      [userId],
+    );
+    const oldImageUrl = oldResult.rows[0]?.profile_image_url;
+
+    await db.query(
+      "UPDATE profiles SET profile_image_url = $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2",
+      [imageUrl, userId],
+    );
+
+    // ลบไฟล์เก่าทิ้งเฉพาะกรณีเป็นไฟล์ที่เราเก็บไว้เอง (ไม่ใช่ URL รูปจาก LINE ที่ไม่ได้อยู่บน
+    // disk ของเรา ลบไม่ได้และไม่ควรไปยุ่งด้วย)
+    if (oldImageUrl && oldImageUrl.includes("/uploads/profile-images/")) {
+      const oldFilename = oldImageUrl.split("/uploads/profile-images/")[1];
+      if (oldFilename) {
+        fs.unlink(path.join(UPLOAD_DIR, oldFilename), (err) => {
+          if (err && err.code !== "ENOENT") {
+            console.error("Delete Old Profile Image Error:", err);
+          }
+        });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "อัปโหลดรูปโปรไฟล์สำเร็จ",
+      data: { profile_image_url: imageUrl },
+    });
+  } catch (error) {
+    console.error("Upload User Profile Image Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการอัปโหลดรูป" });
   }
 };

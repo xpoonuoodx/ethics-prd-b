@@ -1,6 +1,7 @@
 const db = require("../db");
 const bcrypt = require("bcryptjs");
 const { isValidUsername, isValidPassword } = require("../utils/validators");
+const { getAppSettings } = require("../utils/appSettings");
 
 // กลุ่มอุตสาหกรรมของหน่วยงาน
 const VALID_SECTORS = [
@@ -332,8 +333,8 @@ exports.deleteUser = async (req, res) => {
 };
 
 exports.addUser = async (req, res) => {
-  // รับข้อมูลเพิ่มเติม email และ id_card จากหน้าบ้าน
-  const { username, password, name, email, id_card, role, org_id } = req.body;
+  // รับข้อมูลเพิ่มเติม email จากหน้าบ้าน
+  const { username, password, name, email, role, org_id } = req.body;
 
   if (!isValidUsername(username)) {
     return res.status(400).json({
@@ -345,13 +346,6 @@ exports.addUser = async (req, res) => {
     return res.status(400).json({
       success: false,
       message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)",
-    });
-  }
-  // profiles.id_card เป็น NOT NULL + UNIQUE ในฐานข้อมูล ต้องเช็คให้มีค่าก่อน insert เสมอ
-  if (!id_card) {
-    return res.status(400).json({
-      success: false,
-      message: "กรุณาระบุเลขประจำตัวประชาชน",
     });
   }
 
@@ -370,19 +364,6 @@ exports.addUser = async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "ชื่อผู้ใช้งานนี้ถูกใช้ไปแล้ว" });
-    }
-
-    // ตรวจสอบความซ้ำซ้อนของเลขประจำตัวประชาชน
-    const checkIdCard = await db.query(
-      "SELECT id FROM profiles WHERE id_card = $1",
-      [id_card],
-    );
-    if (checkIdCard.rows.length > 0) {
-      await db.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        message: "เลขประจำตัวประชาชนนี้มีอยู่ในระบบแล้ว",
-      });
     }
 
     // ตรวจสอบความซ้ำซ้อนของอีเมล
@@ -434,13 +415,13 @@ exports.addUser = async (req, res) => {
     const firstName = nameParts[0] || "";
     const lastName = nameParts.slice(1).join(" ") || "";
 
-    // 2. สั่งบันทึกข้อมูลส่วนบุคคลลงตาราง profiles พร้อมผูกข้อมูล email และ id_card ที่ส่งมาจากหน้าบ้าน
+    // 2. สั่งบันทึกข้อมูลส่วนบุคคลลงตาราง profiles พร้อมผูกข้อมูล email ที่ส่งมาจากหน้าบ้าน
     await db.query(
       `
-      INSERT INTO profiles (user_id, first_name_th, last_name_th, email, id_card, is_verified)
-      VALUES ($1, $2, $3, $4, $5, true)
+      INSERT INTO profiles (user_id, first_name_th, last_name_th, email, is_verified)
+      VALUES ($1, $2, $3, $4, true)
     `,
-      [newUserId, firstName, lastName, email, id_card],
+      [newUserId, firstName, lastName, email],
     );
 
     // ยืนยันการบันทึกข้อมูลทั้งหมดลงฐานข้อมูลระบบ
@@ -605,13 +586,12 @@ exports.viewUser = async (req, res) => {
       SELECT 
         u.id, 
         u.username, 
-        u.role, 
+        u.role,
         p.email,
-        p.id_card,
-        p.first_name_th || ' ' || p.last_name_th AS name, 
-        o.org_name 
-      FROM users u 
-      LEFT JOIN profiles p ON u.id = p.user_id 
+        p.first_name_th || ' ' || p.last_name_th AS name,
+        o.org_name
+      FROM users u
+      LEFT JOIN profiles p ON u.id = p.user_id
       LEFT JOIN organizations o ON u.organization_id = o.id
       WHERE u.id = $1
     `;
@@ -2160,5 +2140,277 @@ exports.getRecentActivity = async (req, res) => {
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงกิจกรรมล่าสุด" });
+  }
+};
+
+// ==========================================
+// หน้า "ตั้งค่าระบบ" (Admin Settings)
+// ==========================================
+
+// --- ดึงค่าตั้งค่าระบบปัจจุบัน ---
+exports.getSettings = async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT require_email_verification, allow_cross_track_testing FROM app_settings WHERE id = 1",
+    );
+    res.status(200).json({
+      success: true,
+      data: result.rows[0] || {
+        require_email_verification: false,
+        allow_cross_track_testing: false,
+      },
+    });
+  } catch (error) {
+    console.error("Get Settings Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงค่าตั้งค่าระบบ" });
+  }
+};
+
+// --- แก้ไขค่าตั้งค่าระบบ ---
+// รับทีละสวิตช์หรือหลายสวิตช์พร้อมกันก็ได้ (ไม่ส่งมาตัวไหน = ไม่แตะค่าตัวนั้น) เพื่อไม่ให้กระทบ
+// หน้าบ้านเดิมที่เคยส่งแค่ require_email_verification ตัวเดียวมาตลอด
+exports.updateSettings = async (req, res) => {
+  try {
+    const { require_email_verification, allow_cross_track_testing } = req.body;
+
+    if (
+      require_email_verification === undefined &&
+      allow_cross_track_testing === undefined
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: "กรุณาระบุค่าที่ต้องการแก้ไข" });
+    }
+    if (
+      (require_email_verification !== undefined &&
+        typeof require_email_verification !== "boolean") ||
+      (allow_cross_track_testing !== undefined &&
+        typeof allow_cross_track_testing !== "boolean")
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาระบุค่าที่ถูกต้อง",
+      });
+    }
+
+    const current = await getAppSettings();
+    const nextEmailVerification =
+      require_email_verification !== undefined
+        ? require_email_verification
+        : current.require_email_verification;
+    const nextCrossTrackTesting =
+      allow_cross_track_testing !== undefined
+        ? allow_cross_track_testing
+        : current.allow_cross_track_testing;
+
+    await db.query(
+      `UPDATE app_settings SET require_email_verification = $1, allow_cross_track_testing = $2, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+      [nextEmailVerification, nextCrossTrackTesting],
+    );
+
+    res.status(200).json({ success: true, message: "บันทึกการตั้งค่าสำเร็จ" });
+  } catch (error) {
+    console.error("Update Settings Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกการตั้งค่า" });
+  }
+};
+
+// --- เปลี่ยนรหัสผ่านของตัวเอง (ตอน login อยู่) ---
+exports.changeOwnPassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user.id;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณากรอกรหัสผ่านเดิมและรหัสผ่านใหม่ให้ครบถ้วน",
+      });
+    }
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: "รหัสผ่านใหม่ต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)",
+      });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 8 ตัวอักษร",
+      });
+    }
+
+    const userResult = await db.query(
+      "SELECT password FROM users WHERE id = $1",
+      [userId],
+    );
+    if (userResult.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบบัญชีผู้ใช้งานนี้" });
+    }
+
+    const isMatch = await bcrypt.compare(
+      currentPassword,
+      userResult.rows[0].password,
+    );
+    if (!isMatch) {
+      return res
+        .status(400)
+        .json({ success: false, message: "รหัสผ่านเดิมไม่ถูกต้อง" });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await db.query("UPDATE users SET password = $1 WHERE id = $2", [
+      hashedPassword,
+      userId,
+    ]);
+
+    res.status(200).json({ success: true, message: "เปลี่ยนรหัสผ่านสำเร็จ" });
+  } catch (error) {
+    console.error("Change Own Password Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการเปลี่ยนรหัสผ่าน" });
+  }
+};
+
+// --- ดึงรายชื่อบัญชีแอดมินทั้งหมด ---
+exports.getAdmins = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT u.id, u.username, u.is_active, u.created_at,
+              p.first_name_th, p.last_name_th, p.email
+       FROM users u
+       JOIN profiles p ON u.id = p.user_id
+       WHERE u.role = 'admin'
+       ORDER BY u.created_at ASC`,
+    );
+    res.status(200).json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Admins Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงรายชื่อแอดมิน" });
+  }
+};
+
+// --- เพิ่มบัญชีแอดมินใหม่ ---
+exports.addAdmin = async (req, res) => {
+  const { username, password, first_name, last_name, email } = req.body;
+
+  if (!isValidUsername(username)) {
+    return res.status(400).json({
+      success: false,
+      message: "ชื่อผู้ใช้งานต้องเป็นภาษาอังกฤษ ตัวเลข หรือ . _ - เท่านั้น (ห้ามใช้ภาษาไทย)",
+    });
+  }
+  if (!isValidPassword(password) || password.length < 8) {
+    return res.status(400).json({
+      success: false,
+      message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น และยาวอย่างน้อย 8 ตัวอักษร",
+    });
+  }
+  if (!first_name || !last_name || !email) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณากรอกข้อมูลให้ครบถ้วน",
+    });
+  }
+
+  const client = await db.getClient();
+  try {
+    await client.query("BEGIN");
+
+    const checkUsername = await client.query(
+      "SELECT id FROM users WHERE username = $1",
+      [username],
+    );
+    if (checkUsername.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ success: false, message: "ชื่อผู้ใช้งานนี้ถูกใช้ไปแล้ว" });
+    }
+
+    const checkEmail = await client.query(
+      "SELECT id FROM profiles WHERE email = $1",
+      [email],
+    );
+    if (checkEmail.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ success: false, message: "อีเมลนี้ถูกใช้งานแล้ว" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const insertUser = await client.query(
+      `INSERT INTO users (username, password, role) VALUES ($1, $2, 'admin') RETURNING id`,
+      [username, hashedPassword],
+    );
+    const newUserId = insertUser.rows[0].id;
+
+    await client.query(
+      `INSERT INTO profiles (user_id, first_name_th, last_name_th, email, is_verified)
+       VALUES ($1, $2, $3, $4, true)`,
+      [newUserId, first_name, last_name, email],
+    );
+
+    await client.query("COMMIT");
+    res.status(201).json({ success: true, message: "เพิ่มบัญชีแอดมินสำเร็จ" });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Add Admin Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการเพิ่มบัญชีแอดมิน" });
+  } finally {
+    client.release();
+  }
+};
+
+// --- เปิด/ปิดการใช้งานบัญชีแอดมิน (ห้ามปิดบัญชีตัวเอง กันล็อกตัวเองออกจากระบบ) ---
+exports.toggleAdminStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_active } = req.body;
+
+    if (typeof is_active !== "boolean") {
+      return res
+        .status(400)
+        .json({ success: false, message: "กรุณาระบุค่าที่ถูกต้อง" });
+    }
+    if (parseInt(id, 10) === req.user.id) {
+      return res.status(400).json({
+        success: false,
+        message: "ไม่สามารถปิดการใช้งานบัญชีของตัวเองได้",
+      });
+    }
+
+    const result = await db.query(
+      "UPDATE users SET is_active = $1 WHERE id = $2 AND role = 'admin'",
+      [is_active, id],
+    );
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบบัญชีแอดมินนี้" });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: is_active ? "เปิดการใช้งานบัญชีสำเร็จ" : "ปิดการใช้งานบัญชีสำเร็จ",
+    });
+  } catch (error) {
+    console.error("Toggle Admin Status Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการเปลี่ยนสถานะบัญชี" });
   }
 };

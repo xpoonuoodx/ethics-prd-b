@@ -1,9 +1,8 @@
-process.env.TZ = 'Asia/Bangkok';
+process.env.TZ = "Asia/Bangkok";
 
 const dotenv = require("dotenv");
 const app = require("./app");
 const swaggerUi = require("swagger-ui-express");
-
 
 require("dotenv").config({ path: `.env` });
 require("dotenv").config({ path: `.env.${process.env.NODE_ENV}` });
@@ -44,7 +43,6 @@ console.log("PORT:", process.env.MYAPP_PORT);
 
 // ใช้งาน Swagger
 // app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-
 
 const server = app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

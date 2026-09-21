@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const regulatorControllers = require("../controllers/regulatorControllers");
 const { verifyToken, requireRole } = require("../middlewares/authMiddlewares"); // ปรับ path ให้ตรงกับ middleware ของคุณ
+const { uploadProfileImageMiddleware } = require("../utils/uploadMiddleware");
 
 // ทุก route ในไฟล์นี้ต้องเป็น role regulator เท่านั้น
 router.use(verifyToken, requireRole("regulator"));
@@ -111,6 +112,20 @@ router.get(
   "/component-activities/:componentId",
   verifyToken,
   regulatorControllers.getRegulatorComponentActivities,
+);
+
+// เส้นทางหน้า "ข้อมูลส่วนตัว" ของตัวเอง
+router.get("/profile", verifyToken, regulatorControllers.getRegulatorProfile);
+router.put(
+  "/profile",
+  verifyToken,
+  regulatorControllers.updateRegulatorProfile,
+);
+router.post(
+  "/profile-image",
+  verifyToken,
+  uploadProfileImageMiddleware,
+  regulatorControllers.uploadRegulatorProfileImage,
 );
 
 module.exports = router;
