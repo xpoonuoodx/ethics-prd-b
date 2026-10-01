@@ -35,4 +35,9 @@ dist-ssr
 .env.uat.local
 .env.production.local
 
+# ไฟล์รูปที่ผู้ใช้อัปโหลดจริง (ไม่ commit เข้า git เพราะเป็นข้อมูลรันไทม์เฉพาะแต่ละเครื่อง/VM
+# ไม่ใช่โค้ด) แต่ยังเก็บโครงสร้างโฟลเดอร์ไว้ในโปรเจคผ่าน .gitkeep กันโฟลเดอร์หายตอน clone ใหม่
+uploads/profile-images/*
+!uploads/profile-images/.gitkeep
+
 .tar

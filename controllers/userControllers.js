@@ -231,10 +231,28 @@ exports.getUserClassroom = async (req, res) => {
     `;
     const chaptersResult = await db.query(chaptersQuery, [userId]);
 
+    // เอาไว้เช็คว่าแต่ละบทกดปุ่ม "ทำแบบทดสอบ" ตรงนี้ได้เลยไหม (เหมือน logic ที่ getChapterById
+    // ใช้ตัดสิน canTakeTest) กันปุ่มโผล่มาแล้วกดแล้วเจอ error หลักสูตรอื่นตอนเข้าไปจริง
+    const userTypeResult = await db.query(
+      "SELECT user_type FROM users WHERE id = $1",
+      [userId],
+    );
+    const ownTargetGroup = getTargetGroupFromUserType(
+      userTypeResult.rows[0]?.user_type,
+    );
+    const { allow_cross_track_testing } = await getAppSettings();
+
     const courses = [1, 2, 3].map((group) => ({
       targetGroup: group,
       ...COURSE_INFO[group],
-      chapters: chaptersResult.rows.filter((row) => row.targetGroup === group),
+      chapters: chaptersResult.rows
+        .filter((row) => row.targetGroup === group)
+        .map((row) => ({
+          ...row,
+          canTakeTest:
+            (allow_cross_track_testing || row.targetGroup === ownTargetGroup) &&
+            parseInt(row.totalQuestions, 10) > 0,
+        })),
     }));
 
     res.status(200).json({
@@ -257,9 +275,10 @@ exports.getChapterById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // 💡 แก้ไขแล้ว: ดึงเฉพาะ title, video_url และ target_group (ไม่มี content แล้วเพื่อป้องกัน Error)
+    // 💡 แก้ไขแล้ว: ดึงเฉพาะ title, video_url, target_group และ description
+    // (ไม่ใช้ SELECT * เพื่อป้องกัน Error จากคอลัมน์ที่ไม่ได้ตั้งใจส่งออกไป)
     const result = await db.query(
-      "SELECT title, video_url, target_group FROM chapters WHERE id = $1",
+      "SELECT title, video_url, target_group, description FROM chapters WHERE id = $1",
       [id],
     );
 
@@ -290,6 +309,7 @@ exports.getChapterById = async (req, res) => {
       data: {
         title: chapter.title,
         video_url: chapter.video_url,
+        description: chapter.description || "",
         canTakeTest:
           allow_cross_track_testing || chapter.target_group === ownTargetGroup,
       },

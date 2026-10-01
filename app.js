@@ -65,7 +65,7 @@ app.use(
 //ดีพอยเวอรชันใหม่ 2
 // Routes
 // app.use('/', homeRoutes);
-app.use("/public", publicRoutes);
+app.use('/public', publicRoutes);
 app.use("/auth", authRoutes);
 app.use("/user", userRoutes);
 app.use("/admin", adminRoutes);
@@ -77,9 +77,7 @@ app.use("/regulator", regulatorRoutes);
 // (ครอบคลุมทั้ง error จาก CORS middleware ด้านบนและ error อื่นๆ ที่ไม่ถูกจับใน controller)
 app.use((err, req, res, next) => {
   if (err && err.message === "Not allowed by CORS") {
-    return res
-      .status(403)
-      .json({ message: "Origin นี้ไม่ได้รับอนุญาตให้เข้าถึง API" });
+    return res.status(403).json({ message: "Origin นี้ไม่ได้รับอนุญาตให้เข้าถึง API" });
   }
   console.error("Unhandled Error:", err);
   res.status(500).json({ message: "เกิดข้อผิดพลาดจากเซิร์ฟเวอร์" });

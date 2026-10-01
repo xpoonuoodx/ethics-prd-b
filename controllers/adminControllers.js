@@ -1547,6 +1547,7 @@ exports.createChapter = async (req, res) => {
       videoUrl,
       questions,
       passingPercentage,
+      description,
     } = req.body;
 
     let targetGroup = 1;
@@ -1554,9 +1555,10 @@ exports.createChapter = async (req, res) => {
     else if (targetRole === "Group 3") targetGroup = 3;
 
     // บันทึกค่า passing_percentage ลงฐานข้อมูล (ถ้าไม่ส่งมาให้ใช้ค่า default 80)
+    // description เป็น markdown text ของ "รายละเอียดบทเรียน" ไม่บังคับกรอก (nullable)
     const insertChapterQuery = `
-      INSERT INTO chapters (title, target_group, video_url, status, passing_percentage)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO chapters (title, target_group, video_url, status, passing_percentage, description)
+      VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING id
     `;
     const chapterResult = await client.query(insertChapterQuery, [
@@ -1565,6 +1567,7 @@ exports.createChapter = async (req, res) => {
       videoUrl,
       status,
       passingPercentage ? parseInt(passingPercentage) : 80,
+      description || null,
     ]);
     const newChapterId = chapterResult.rows[0].id;
 
@@ -1640,6 +1643,7 @@ exports.getChapterById = async (req, res) => {
         status: chapter.status,
         videoUrl: chapter.video_url,
         passingPercentage: chapter.passing_percentage || 80, // ส่งเกณฑ์กลับไปแสดงผล
+        description: chapter.description || "", // markdown รายละเอียดบทเรียน (SELECT * ข้างบนดึงมาให้อยู่แล้ว)
         questions: questions,
       },
     });
@@ -1664,6 +1668,7 @@ exports.updateChapter = async (req, res) => {
       videoUrl,
       questions,
       passingPercentage,
+      description,
     } = req.body;
 
     let targetGroup = 1;
@@ -1673,11 +1678,11 @@ exports.updateChapter = async (req, res) => {
     client = await db.getClient();
     await client.query("BEGIN");
 
-    // 1. อัปเดตข้อมูลบทเรียนหลักรวมถึงเกณฑ์ผ่านคะแนน
+    // 1. อัปเดตข้อมูลบทเรียนหลักรวมถึงเกณฑ์ผ่านคะแนนและรายละเอียดบทเรียน (markdown)
     const updateChapterQuery = `
-      UPDATE chapters 
-      SET title = $1, target_group = $2, video_url = $3, status = $4, passing_percentage = $5, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $6
+      UPDATE chapters
+      SET title = $1, target_group = $2, video_url = $3, status = $4, passing_percentage = $5, description = $6, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $7
     `;
     await client.query(updateChapterQuery, [
       title,
@@ -1685,6 +1690,7 @@ exports.updateChapter = async (req, res) => {
       videoUrl,
       status,
       passingPercentage ? parseInt(passingPercentage) : 80,
+      description || null,
       id,
     ]);
 

@@ -15,9 +15,9 @@ if (!process.env.MYAPP_DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: process.env.MYAPP_DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  // ssl: {
+  //   rejectUnauthorized: false,
+  // },
 });
 
 // สำคัญ: Neon จะตัด connection ที่ idle อยู่ทิ้งเองเป็นระยะ ถ้าไม่ดัก error ตรงนี้ไว้
@@ -29,9 +29,9 @@ pool.on("error", (err) => {
 // ทดสอบการเชื่อมต่อเมื่อเริ่มเซิร์ฟเวอร์
 pool.connect((err, client, release) => {
   if (err) {
-    return console.error("Neon connecting failed:", err.stack);
+    return console.error("My PostgreSQL connecting failed:", err.stack);
   }
-  console.log("Neon PostgreSQL is Connected");
+  console.log("my PostgreSQL is Connected");
   release(); // คืน client กลับเข้า pool ทันทีเมื่อเทสต์เสร็จ
 });
 
