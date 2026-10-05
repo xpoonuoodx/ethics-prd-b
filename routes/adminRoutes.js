@@ -1,5 +1,6 @@
 const express = require("express");
 const adminControllers = require("../controllers/adminControllers");
+const alumniControllers = require("../controllers/alumniControllers");
 const { verifyToken, requireRole } = require("../middlewares/authMiddlewares");
 const router = express.Router();
 
@@ -7,6 +8,12 @@ const router = express.Router();
 router.use(verifyToken, requireRole("admin"));
 
 router.get("/dashboard", verifyToken, adminControllers.getDashboard);
+
+// จัดการรุ่นของทำเนียบรุ่น (ชื่อรุ่น + ช่วงวันที่)
+router.get("/alumni-batches", alumniControllers.getAdminBatches);
+router.post("/alumni-batches", alumniControllers.createBatch);
+router.put("/alumni-batches/:id", alumniControllers.updateBatch);
+router.delete("/alumni-batches/:id", alumniControllers.deleteBatch);
 
 // เพิ่มเส้นทางสำหรับดึงข้อมูลและเพิ่มข้อมูลหน่วยงาน
 router.get("/get-organize", verifyToken, adminControllers.getOrganizations);
