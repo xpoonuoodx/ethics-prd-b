@@ -41,3 +41,5 @@ uploads/profile-images/*
 !uploads/profile-images/.gitkeep
 
 .tar
+# image export
+*.tar
