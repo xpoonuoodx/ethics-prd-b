@@ -1760,6 +1760,7 @@ exports.getCertificates = async (req, res) => {
     const query = `
       SELECT
         c.id AS "certId",
+        c.user_id AS "userId",
         c.course_group AS "courseGroup",
         c.issued_at AS "issuedAt",
         c.cert_number AS "certNumber",
