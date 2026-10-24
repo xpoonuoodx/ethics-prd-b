@@ -661,6 +661,75 @@ exports.editUser = async (req, res) => {
   }
 };
 
+// เปลี่ยน role ผู้กำกับดูแล -> ผู้ใช้ทั่วไป (ทำได้เมื่อยังไม่เพิ่มผู้ใช้ในหน่วยงานและยังไม่สร้างโครงการ)
+exports.changeUserRole = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (role !== "user") {
+      return res
+        .status(400)
+        .json({ success: false, message: "รองรับเฉพาะการเปลี่ยนเป็นผู้ใช้งานทั่วไปเท่านั้น" });
+    }
+
+    const userRes = await db.query(
+      "SELECT id, role, organization_id FROM users WHERE id = $1",
+      [id],
+    );
+    if (userRes.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบผู้ใช้งานนี้ในระบบ" });
+    }
+    const target = userRes.rows[0];
+    if (target.role !== "regulator") {
+      return res
+        .status(400)
+        .json({ success: false, message: "เปลี่ยน role ได้เฉพาะผู้กำกับดูแลเท่านั้น" });
+    }
+
+    // เงื่อนไข 1: ต้องยังไม่ได้เพิ่มผู้ใช้ในหน่วยงานของตัวเอง
+    if (target.organization_id) {
+      const members = await db.query(
+        "SELECT COUNT(*)::int AS cnt FROM users WHERE organization_id = $1 AND role = 'user' AND id <> $2",
+        [target.organization_id, id],
+      );
+      if (members.rows[0].cnt > 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "ยังไม่สามารถเปลี่ยน role ได้ เนื่องจากผู้กำกับดูแลรายนี้ได้เพิ่มผู้ใช้ในหน่วยงานแล้ว",
+        });
+      }
+    }
+
+    // เงื่อนไข 2: ต้องยังไม่ได้สร้างโครงการ
+    const projects = await db.query(
+      "SELECT COUNT(*)::int AS cnt FROM projects WHERE created_by = $1",
+      [id],
+    );
+    if (projects.rows[0].cnt > 0) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "ยังไม่สามารถเปลี่ยน role ได้ เนื่องจากผู้กำกับดูแลรายนี้ได้สร้างโครงการแล้ว",
+      });
+    }
+
+    await db.query("UPDATE users SET role = 'user' WHERE id = $1", [id]);
+    res
+      .status(200)
+      .json({ success: true, message: "เปลี่ยน role เป็นผู้ใช้งานทั่วไปสำเร็จ" });
+  } catch (error) {
+    console.error("Change User Role Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดจากเซิร์ฟเวอร์ ไม่สามารถเปลี่ยน role ได้",
+    });
+  }
+};
+
 exports.viewOrganization = async (req, res) => {
   const { id } = req.params;
 

@@ -26,6 +26,7 @@ router.post("/add-user", verifyToken, adminControllers.addUser);
 
 router.get("/view-user/:id", verifyToken, adminControllers.viewUser);
 router.put("/edit-user/:id", verifyToken, adminControllers.editUser);
+router.put("/change-user-role/:id", verifyToken, adminControllers.changeUserRole);
 
 router.get(
   "/view-organize/:id",

@@ -38,6 +38,10 @@ const calcDeltaPct = (totalNow, totalLastMonthEnd) => {
   return Math.round(((totalNow - totalLastMonthEnd) / totalLastMonthEnd) * 1000) / 10;
 };
 
+// เป้าหมายจำนวนผู้ใช้งานทั้งหมดที่ตั้งไว้ - การ์ด "ผู้ใช้งานทั้งหมด" โชว์ % ความคืบหน้าเทียบ
+// เป้านี้แทนการเทียบเดือนก่อน (เทียบเดือนก่อนเจอปัญหาฐานเล็กแล้วเปอร์เซ็นต์พุ่งเวอร์เกินจริง)
+const USER_GOAL = 5000;
+
 exports.getDashboardStats = async (req, res) => {
   try {
     // 1. โครงการทั้งหมด + เทียบเดือนก่อนหน้า
@@ -48,12 +52,9 @@ exports.getDashboardStats = async (req, res) => {
       FROM projects
     `);
 
-    // 2. ผู้ใช้งานทั้งหมด (role = 'user') + เทียบเดือนก่อนหน้า
+    // 2. ผู้ใช้งานทั้งหมด (role = 'user') - ไม่ต้องเทียบเดือนก่อนแล้ว เทียบกับเป้าหมาย USER_GOAL แทน
     const userCountRes = await db.query(`
-      SELECT
-        COUNT(*) as total_now,
-        COUNT(*) FILTER (WHERE created_at < DATE_TRUNC('month', CURRENT_DATE)) as total_last_month_end
-      FROM users WHERE role = 'user'
+      SELECT COUNT(*) as total_now FROM users WHERE role = 'user'
     `);
 
     // 3. สถานะโครงการทั้งระบบ (ปฏิบัติตาม / ต้องปรับปรุง / อยู่ระหว่างประเมิน)
@@ -210,10 +211,9 @@ exports.getDashboardStats = async (req, res) => {
             parseInt(projectCountRes.rows[0].total_last_month_end) || 0,
           ),
           totalUsers: totalUsersNow,
-          totalUsersDeltaPct: calcDeltaPct(
-            totalUsersNow,
-            parseInt(userCountRes.rows[0].total_last_month_end) || 0,
-          ),
+          // % ความคืบหน้าเทียบเป้าหมาย (จำนวนผู้ใช้งาน ÷ เป้าหมาย × 100) แทนการเทียบเดือนก่อน
+          userGoal: USER_GOAL,
+          totalUsersGoalPct: Math.round((totalUsersNow / USER_GOAL) * 1000) / 10,
           compliantProjects,
           compliantPct:
             totalProjectsNow === 0
