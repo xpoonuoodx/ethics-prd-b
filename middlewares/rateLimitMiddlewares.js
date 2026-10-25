@@ -71,7 +71,17 @@ const lineAuthLimiter = rateLimit({
   },
 });
 
+// กันยิงนับการเข้าชมรัว ๆ เพื่อปั่นตัวเลข (ปกติหน้าบ้านส่งแค่ 1 ครั้งต่อ session)
+const visitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "ส่งข้อมูลบ่อยเกินไป" },
+});
+
 module.exports = {
+  visitLimiter,
   loginLimiter,
   registerLimiter,
   forgotPasswordLimiter,

@@ -357,3 +357,50 @@ exports.verifyCertificate = async (req, res) => {
       .json({ success: false, message: "เกิดข้อผิดพลาดในการตรวจสอบใบประกาศ" });
   }
 };
+
+// บันทึกการเข้าหน้าโฮม 1 ครั้ง (หน้าบ้านส่งมาครั้งเดียวต่อ session)
+exports.recordVisit = async (req, res) => {
+  const { visitorId } = req.body || {};
+  if (typeof visitorId !== "string" || !/^[A-Za-z0-9-]{8,64}$/.test(visitorId)) {
+    return res
+      .status(400)
+      .json({ success: false, message: "visitorId ไม่ถูกต้อง" });
+  }
+  try {
+    await db.query("INSERT INTO site_visits (visitor_id) VALUES ($1)", [
+      visitorId,
+    ]);
+    res.status(201).json({ success: true });
+  } catch (error) {
+    console.error("Record Visit Error:", error);
+    res.status(500).json({ success: false, message: "บันทึกการเข้าชมไม่สำเร็จ" });
+  }
+};
+
+// สถิติการเข้าใช้งานสำหรับแสดงที่ footer (วันนี้นับตามเวลาไทย)
+exports.getVisitStats = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(DISTINCT visitor_id)::int AS unique_visitors,
+        COUNT(*) FILTER (
+          WHERE (visited_at AT TIME ZONE 'Asia/Bangkok')::date
+              = (NOW() AT TIME ZONE 'Asia/Bangkok')::date
+        )::int AS today
+      FROM site_visits
+    `);
+    const row = result.rows[0];
+    res.status(200).json({
+      success: true,
+      data: {
+        total: row.total,
+        today: row.today,
+        uniqueVisitors: row.unique_visitors,
+      },
+    });
+  } catch (error) {
+    console.error("Get Visit Stats Error:", error);
+    res.status(500).json({ success: false, message: "โหลดสถิติไม่สำเร็จ" });
+  }
+};
