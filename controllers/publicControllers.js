@@ -1,4 +1,5 @@
 const db = require("../db");
+const { google } = require("googleapis");
 
 // จับคู่ user_type รายบุคคล เข้ากลุ่มบทบาทใหญ่ 3 กลุ่ม (ใช้ pattern เดียวกับที่ userControllers.js ใช้แบ่ง target_group)
 const ROLE_BUCKETS = [
@@ -402,5 +403,96 @@ exports.getVisitStats = async (req, res) => {
   } catch (error) {
     console.error("Get Visit Stats Error:", error);
     res.status(500).json({ success: false, message: "โหลดสถิติไม่สำเร็จ" });
+  }
+};
+
+// --- สถิติผู้เข้าชมจาก Google Analytics (GA4 Data API) ---
+// แยกจาก getVisitStats ด้านบน (นับเองในตาราง site_visits) - อันนี้ดึงตัวเลขจาก GA โดยตรง
+// แคชไว้ในหน่วยความจำ 1 ชม. กันยิง GA API ถี่เกินไป (มีโควต้ารายวัน) และลด latency ของหน้าเว็บ
+let gaStatsCache = { data: null, fetchedAt: 0 };
+const GA_CACHE_TTL_MS = 60 * 60 * 1000;
+
+const getAnalyticsDataClient = () => {
+  const propertyId = process.env.GA_PROPERTY_ID;
+  const keyBase64 = process.env.GA_SERVICE_ACCOUNT_KEY_BASE64;
+  if (!propertyId || !keyBase64) return null;
+
+  // service account key เก็บเป็น base64 ของไฟล์ JSON ทั้งก้อน (กันปัญหา .env escape อักขระ
+  // พิเศษใน private_key ตอน deploy จริง) ถอดกลับเป็น object ตอนใช้งาน
+  const credentials = JSON.parse(
+    Buffer.from(keyBase64, "base64").toString("utf-8"),
+  );
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/analytics.readonly"],
+  });
+  return {
+    client: google.analyticsdata({ version: "v1beta", auth }),
+    propertyId,
+  };
+};
+
+exports.getGaVisitorStats = async (req, res) => {
+  try {
+    if (
+      gaStatsCache.data &&
+      Date.now() - gaStatsCache.fetchedAt < GA_CACHE_TTL_MS
+    ) {
+      return res
+        .status(200)
+        .json({ success: true, data: gaStatsCache.data, cached: true });
+    }
+
+    const ga = getAnalyticsDataClient();
+    if (!ga) {
+      return res.status(503).json({
+        success: false,
+        message:
+          "ยังไม่ได้ตั้งค่า Google Analytics Data API (GA_PROPERTY_ID / GA_SERVICE_ACCOUNT_KEY_BASE64)",
+      });
+    }
+
+    const [realtimeReport, totalReport] = await Promise.all([
+      // ใช้ Realtime API สำหรับ "วันนี้" แทน runReport ธรรมดา - runReport (รายงานหลัก) มี
+      // processing lag หลายชั่วโมงถึง 24-48 ชม. กว่าข้อมูลวันนี้จะขึ้น ทำให้เพิ่งตั้งค่าเสร็จ
+      // แล้วเห็นเป็น 0 ทั้งที่มีคนเข้าจริง ส่วน Realtime API นับผู้ใช้งานที่ active ใน 30 นาทีล่าสุด
+      // ขึ้นทันทีไม่มี lag
+      ga.client.properties.runRealtimeReport({
+        property: `properties/${ga.propertyId}`,
+        requestBody: {
+          metrics: [{ name: "activeUsers" }],
+        },
+      }),
+      ga.client.properties.runReport({
+        property: `properties/${ga.propertyId}`,
+        requestBody: {
+          // GA4 Data API ไม่มี metric "ยอดรวมตั้งแต่เริ่มต้น" ตรงๆ ใช้ช่วงวันที่กว้างแทน
+          dateRanges: [{ startDate: "2020-01-01", endDate: "today" }],
+          metrics: [{ name: "activeUsers" }, { name: "screenPageViews" }],
+        },
+      }),
+    ]);
+
+    const activeNow = Number(
+      realtimeReport.data.rows?.[0]?.metricValues?.[0]?.value || 0,
+    );
+    const totalUsers = Number(
+      totalReport.data.rows?.[0]?.metricValues?.[0]?.value || 0,
+    );
+    const totalPageViews = Number(
+      totalReport.data.rows?.[0]?.metricValues?.[1]?.value || 0,
+    );
+
+    // เก็บ field ชื่อ "today" ไว้ตามเดิมเพื่อไม่ต้องแก้ frontend แต่ค่าจริงคือ active ผู้ใช้งาน
+    // ใน 30 นาทีล่าสุด (ความหมายใกล้เคียง "ตอนนี้" มากกว่า "วันนี้ทั้งวัน")
+    const data = { today: activeNow, totalUsers, totalPageViews };
+    gaStatsCache = { data, fetchedAt: Date.now() };
+
+    res.status(200).json({ success: true, data, cached: false });
+  } catch (error) {
+    console.error("Get GA Visitor Stats Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "โหลดสถิติจาก Google Analytics ไม่สำเร็จ" });
   }
 };
