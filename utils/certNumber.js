@@ -20,6 +20,7 @@ const TARGET_GROUP_PREFIX = {
   1: "reg", // regulator / policy
   2: "res", // developer / researcher / service provider
   3: "usr", // ทั่วไป
+  4: "ws", // Workshop (ภาคปฏิบัติ) - ไม่ผูกกับ user_type เสมอ
 };
 
 // สร้างเลขที่ใบประกาศรูปแบบ {prefix}-{ปี ค.ศ. 2 หลัก}{เลขรัน 5 หลัก} เช่น dev-2600001
@@ -30,7 +31,9 @@ const TARGET_GROUP_PREFIX = {
 const generateCertNumber = async (userType, targetGroup) => {
   const ownPrefix = USER_TYPE_PREFIX[userType];
   const isOwnTrack =
-    ownPrefix && getTargetGroupFromUserType(userType) === targetGroup;
+    ownPrefix &&
+    targetGroup !== 4 &&
+    getTargetGroupFromUserType(userType) === targetGroup;
   const prefix = isOwnTrack
     ? ownPrefix
     : TARGET_GROUP_PREFIX[targetGroup] || FALLBACK_PREFIX;

@@ -1833,6 +1833,9 @@ exports.getCertificates = async (req, res) => {
         c.course_group AS "courseGroup",
         c.issued_at AS "issuedAt",
         c.cert_number AS "certNumber",
+        -- กลุ่ม 4 (Workshop): ช่วงวันอบรมจากที่ผู้ใช้ส่งไว้ ใช้พิมพ์ในใบประกาศฯ
+        (SELECT to_char(MIN(s.training_date), 'YYYY-MM-DD') FROM user_onsite_submissions s WHERE s.account_id = c.user_id) AS "trainingStart",
+        (SELECT to_char(MAX(s.training_date), 'YYYY-MM-DD') FROM user_onsite_submissions s WHERE s.account_id = c.user_id) AS "trainingEnd",
         p.first_name_th || ' ' || p.last_name_th AS "userName",
         p.email AS "userEmail",
         o.org_name AS "orgName", -- แก้เป็น org_name ตามโครงสร้าง DB จริง

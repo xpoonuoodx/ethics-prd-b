@@ -45,6 +45,11 @@ router.get(
 
 // เส้นทางหน้า "ข้อมูลส่วนตัว" ของตัวเอง
 router.get("/profile", verifyToken, userControllers.getUserProfile);
+
+// หลักสูตรออนไซต์: วันที่อบรม + ลิงก์
+router.get("/onsite", verifyToken, userControllers.getOnsiteSubmissions);
+router.post("/onsite", verifyToken, userControllers.createOnsiteSubmission);
+router.put("/onsite/:id", verifyToken, userControllers.updateOnsiteSubmission);
 router.put("/profile", verifyToken, userControllers.updateUserProfile);
 router.post(
   "/profile-image",

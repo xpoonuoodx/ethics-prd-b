@@ -913,7 +913,9 @@ exports.getUserCertificates = async (req, res) => {
         c.id as cert_id, c.course_group, c.issued_at, c.cert_number,
         cs.course_name, cs.signatory_name, cs.signatory_position,
         cs.background_url, cs.logo_url, cs.signature_url,
-        cs.issuer_name, cs.description
+        cs.issuer_name, cs.description,
+        (SELECT to_char(MIN(s.training_date), 'YYYY-MM-DD') FROM user_onsite_submissions s WHERE s.account_id = c.user_id) AS training_start,
+        (SELECT to_char(MAX(s.training_date), 'YYYY-MM-DD') FROM user_onsite_submissions s WHERE s.account_id = c.user_id) AS training_end
       FROM certificates c
       LEFT JOIN certificate_settings cs ON c.course_group = cs.course_group
       WHERE c.user_id = $1
@@ -945,7 +947,14 @@ exports.getUserCertificates = async (req, res) => {
         return {
           certId: cert.cert_id,
           certNumber: cert.cert_number,
-          course_name: cert.course_name || "AI Ethics Management",
+          courseGroup: cert.course_group,
+          trainingStart: cert.training_start,
+          trainingEnd: cert.training_end,
+          course_name:
+            cert.course_name ||
+            (cert.course_group === 4
+              ? "กิจกรรมฝึกอบรมหลักสูตรจริยธรรมปัญญาประดิษฐ์ในภาคปฏิบัติ (Workshop)"
+              : "AI Ethics Management"),
           signatory_name: cert.signatory_name,
           signatory_position: cert.signatory_position,
           background_url: cert.background_url,
@@ -1135,5 +1144,163 @@ exports.uploadUserProfileImage = async (req, res) => {
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการอัปโหลดรูป" });
+  }
+};
+
+// ==========================================
+// หลักสูตรออนไซต์: ผู้ใช้เลือกวันที่อบรม + กรอกลิงก์ (ส่งได้ไม่เกิน MAX_ONSITE_SUBMISSIONS วัน)
+// ==========================================
+const MAX_ONSITE_SUBMISSIONS = 2;
+const WORKSHOP_CERT_GROUP = 4;
+
+// ออกใบประกาศฯ กลุ่ม 4 (Workshop) ให้ผู้ที่ส่งงานครบทุกวัน (ครบ MAX_ONSITE_SUBMISSIONS วัน) - ออกครั้งเดียว
+// เลขที่ขึ้นต้น ws เช่น ws-2600001 คืนค่า true ถ้าผู้ใช้มีใบประกาศฯ ของ Workshop แล้ว (ออกให้หรือมีอยู่เดิม)
+const ensureWorkshopCertificate = async (accountId) => {
+  const count = await db.query(
+    "SELECT COUNT(*)::int AS n FROM user_onsite_submissions WHERE account_id = $1",
+    [accountId],
+  );
+  if (count.rows[0].n < MAX_ONSITE_SUBMISSIONS) return false;
+
+  const existing = await db.query(
+    "SELECT id FROM certificates WHERE user_id = $1 AND course_group = $2",
+    [accountId, WORKSHOP_CERT_GROUP],
+  );
+  if (existing.rows.length > 0) return true;
+
+  const certNumber = await generateCertNumber(null, WORKSHOP_CERT_GROUP);
+  await db.query(
+    `INSERT INTO certificates (user_id, course_group, issued_at, cert_number)
+     VALUES ($1, $2, CURRENT_TIMESTAMP, $3)`,
+    [accountId, WORKSHOP_CERT_GROUP, certNumber],
+  );
+  return true;
+};
+
+const validateOnsiteBody = (body) => {
+  const trainingDate = body.training_date;
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  if (
+    typeof trainingDate !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(trainingDate) ||
+    Number.isNaN(Date.parse(trainingDate))
+  ) {
+    return { error: "กรุณาเลือกวันที่อบรม" };
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    return { error: "ลิงก์ต้องขึ้นต้นด้วย http:// หรือ https://" };
+  }
+  return { trainingDate, url };
+};
+
+exports.getOnsiteSubmissions = async (req, res) => {
+  try {
+    const accountId = req.user.account_id || req.user.id;
+    const result = await db.query(
+      `SELECT id, to_char(training_date, 'YYYY-MM-DD') AS training_date, url, updated_at
+       FROM user_onsite_submissions WHERE account_id = $1 ORDER BY training_date`,
+      [accountId],
+    );
+    const certIssued = await ensureWorkshopCertificate(accountId);
+    res.status(200).json({
+      success: true,
+      data: result.rows,
+      max: MAX_ONSITE_SUBMISSIONS,
+      certIssued,
+    });
+  } catch (error) {
+    console.error("Get Onsite Submissions Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงข้อมูลออนไซต์" });
+  }
+};
+
+exports.createOnsiteSubmission = async (req, res) => {
+  try {
+    const accountId = req.user.account_id || req.user.id;
+    const parsed = validateOnsiteBody(req.body);
+    if (parsed.error) {
+      return res.status(400).json({ success: false, message: parsed.error });
+    }
+
+    const count = await db.query(
+      "SELECT COUNT(*)::int AS n FROM user_onsite_submissions WHERE account_id = $1",
+      [accountId],
+    );
+    if (count.rows[0].n >= MAX_ONSITE_SUBMISSIONS) {
+      return res.status(400).json({
+        success: false,
+        message: `ส่งได้ไม่เกิน ${MAX_ONSITE_SUBMISSIONS} วัน หากต้องการแก้ไขให้แก้ที่วันที่ส่งไปแล้ว`,
+      });
+    }
+
+    const result = await db.query(
+      `INSERT INTO user_onsite_submissions (account_id, training_date, url)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (account_id, training_date) DO NOTHING
+       RETURNING id`,
+      [accountId, parsed.trainingDate, parsed.url],
+    );
+    if (result.rowCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "วันที่นี้ส่งไปแล้ว หากต้องการแก้ไขให้แก้ที่วันที่ส่งไปแล้ว",
+      });
+    }
+
+    // ส่งครบทุกวันแล้ว -> ออกใบประกาศฯ Workshop ให้
+    const certIssued = await ensureWorkshopCertificate(accountId);
+
+    res
+      .status(201)
+      .json({ success: true, message: "บันทึกสำเร็จ", certIssued });
+  } catch (error) {
+    console.error("Create Onsite Submission Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึก" });
+  }
+};
+
+exports.updateOnsiteSubmission = async (req, res) => {
+  try {
+    const accountId = req.user.account_id || req.user.id;
+    const id = parseInt(req.params.id, 10);
+    const parsed = validateOnsiteBody(req.body);
+    if (parsed.error) {
+      return res.status(400).json({ success: false, message: parsed.error });
+    }
+
+    const dup = await db.query(
+      `SELECT 1 FROM user_onsite_submissions
+       WHERE account_id = $1 AND training_date = $2 AND id <> $3`,
+      [accountId, parsed.trainingDate, id],
+    );
+    if (dup.rowCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "วันที่นี้ส่งไปแล้ว กรุณาเลือกวันอื่น",
+      });
+    }
+
+    const result = await db.query(
+      `UPDATE user_onsite_submissions
+       SET training_date = $1, url = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3 AND account_id = $4`,
+      [parsed.trainingDate, parsed.url, id, accountId],
+    );
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบข้อมูลที่ต้องการแก้ไข" });
+    }
+
+    res.status(200).json({ success: true, message: "แก้ไขสำเร็จ" });
+  } catch (error) {
+    console.error("Update Onsite Submission Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการแก้ไข" });
   }
 };
