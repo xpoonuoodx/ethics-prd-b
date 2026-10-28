@@ -207,4 +207,31 @@ router.put(
   adminControllers.toggleAdminStatus,
 );
 
+// จัดการวิดีโอ "อบรมออนไลน์ด้วยตัวเอง"
+router.get(
+  "/self-training",
+  verifyToken,
+  adminControllers.getSelfTrainingVideos,
+);
+router.post(
+  "/self-training/add",
+  verifyToken,
+  adminControllers.createSelfTrainingVideo,
+);
+router.get(
+  "/self-training/:id",
+  verifyToken,
+  adminControllers.getSelfTrainingVideoById,
+);
+router.put(
+  "/self-training/edit/:id",
+  verifyToken,
+  adminControllers.updateSelfTrainingVideo,
+);
+router.delete(
+  "/self-training/delete/:id",
+  verifyToken,
+  adminControllers.deleteSelfTrainingVideo,
+);
+
 module.exports = router;

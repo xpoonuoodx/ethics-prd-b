@@ -2493,3 +2493,149 @@ exports.toggleAdminStatus = async (req, res) => {
       .json({ success: false, message: "เกิดข้อผิดพลาดในการเปลี่ยนสถานะบัญชี" });
   }
 };
+
+// ==========================================
+// ฟังก์ชันใหม่: จัดการวิดีโอ "อบรมออนไลน์ด้วยตัวเอง" (Self Training Videos)
+// ต่างจาก chapters (สื่อการเรียนรู้) ตรงที่ไม่มีแบบทดสอบผูกอยู่ด้วย มีแค่วิดีโอ+คำอธิบาย
+// ==========================================
+
+exports.getSelfTrainingVideos = async (req, res) => {
+  try {
+    const query = `
+      SELECT id, title, description, youtube_url AS "youtubeUrl", created_at AS "createdAt"
+      FROM self_training_videos
+      ORDER BY created_at DESC
+    `;
+    const result = await db.query(query);
+
+    res.status(200).json({
+      success: true,
+      message: "ดึงข้อมูลวิดีโอสำเร็จ",
+      data: { videos: result.rows },
+    });
+  } catch (error) {
+    console.error("Get Self Training Videos Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "ไม่สามารถดึงข้อมูลวิดีโอได้" });
+  }
+};
+
+exports.createSelfTrainingVideo = async (req, res) => {
+  try {
+    const { title, youtubeUrl, description } = req.body;
+
+    if (!title || !youtubeUrl) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาระบุชื่อวิดีโอและลิงก์ YouTube",
+      });
+    }
+
+    const insertQuery = `
+      INSERT INTO self_training_videos (title, youtube_url, description, created_by)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `;
+    const result = await db.query(insertQuery, [
+      title,
+      youtubeUrl,
+      description || null,
+      req.user.id,
+    ]);
+
+    res.status(201).json({
+      success: true,
+      message: "เพิ่มวิดีโออบรมออนไลน์เรียบร้อยแล้ว",
+      data: { id: result.rows[0].id },
+    });
+  } catch (error) {
+    console.error("Create Self Training Video Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+  }
+};
+
+exports.getSelfTrainingVideoById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query(
+      `SELECT id, title, description, youtube_url AS "youtubeUrl" FROM self_training_videos WHERE id = $1`,
+      [id],
+    );
+
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบวิดีโอที่ต้องการ" });
+    }
+
+    res.status(200).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("Get Self Training Video By ID Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "ไม่สามารถดึงข้อมูลวิดีโอได้" });
+  }
+};
+
+exports.updateSelfTrainingVideo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, youtubeUrl, description } = req.body;
+
+    if (!title || !youtubeUrl) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาระบุชื่อวิดีโอและลิงก์ YouTube",
+      });
+    }
+
+    const result = await db.query(
+      `UPDATE self_training_videos
+       SET title = $1, youtube_url = $2, description = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4
+       RETURNING id`,
+      [title, youtubeUrl, description || null, id],
+    );
+
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบวิดีโอที่ต้องการแก้ไข" });
+    }
+
+    res
+      .status(200)
+      .json({ success: true, message: "อัปเดตวิดีโอเรียบร้อยแล้ว" });
+  } catch (error) {
+    console.error("Update Self Training Video Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการอัปเดตข้อมูล" });
+  }
+};
+
+exports.deleteSelfTrainingVideo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query(
+      "DELETE FROM self_training_videos WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบวิดีโอที่ต้องการลบ" });
+    }
+
+    res.status(200).json({ success: true, message: "ลบวิดีโอเรียบร้อยแล้ว" });
+  } catch (error) {
+    console.error("Delete Self Training Video Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};

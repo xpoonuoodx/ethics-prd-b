@@ -58,4 +58,16 @@ router.post(
   userControllers.uploadUserProfileImage,
 );
 
+// เส้นทางหน้า "อบรมออนไลน์ด้วยตัวเอง"
+router.get(
+  "/self-training",
+  verifyToken,
+  userControllers.getSelfTrainingVideos,
+);
+router.get(
+  "/self-training/:id",
+  verifyToken,
+  userControllers.getSelfTrainingVideoById,
+);
+
 module.exports = router;

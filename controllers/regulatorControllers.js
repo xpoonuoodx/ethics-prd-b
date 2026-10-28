@@ -1919,3 +1919,40 @@ exports.uploadRegulatorProfileImage = async (req, res) => {
       .json({ success: false, message: "เกิดข้อผิดพลาดในการอัปโหลดรูป" });
   }
 };
+
+// --- "อบรมออนไลน์ด้วยตัวเอง" (รายการวิดีโอ YouTube ที่แอดมินเพิ่มเข้าระบบ) - อ่านอย่างเดียว ---
+exports.getSelfTrainingVideos = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, title, description, youtube_url AS "youtubeUrl", created_at AS "createdAt"
+       FROM self_training_videos ORDER BY created_at DESC`,
+    );
+    res.status(200).json({ success: true, data: { videos: result.rows } });
+  } catch (error) {
+    console.error("Get Self Training Videos Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "ไม่สามารถดึงข้อมูลวิดีโอได้" });
+  }
+};
+
+exports.getSelfTrainingVideoById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query(
+      `SELECT id, title, description, youtube_url AS "youtubeUrl" FROM self_training_videos WHERE id = $1`,
+      [id],
+    );
+    if (result.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบวิดีโอที่ต้องการ" });
+    }
+    res.status(200).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("Get Self Training Video By ID Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "ไม่สามารถดึงข้อมูลวิดีโอได้" });
+  }
+};

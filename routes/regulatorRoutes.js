@@ -128,4 +128,16 @@ router.post(
   regulatorControllers.uploadRegulatorProfileImage,
 );
 
+// เส้นทางหน้า "อบรมออนไลน์ด้วยตัวเอง"
+router.get(
+  "/self-training",
+  verifyToken,
+  regulatorControllers.getSelfTrainingVideos,
+);
+router.get(
+  "/self-training/:id",
+  verifyToken,
+  regulatorControllers.getSelfTrainingVideoById,
+);
+
 module.exports = router;
