@@ -15,6 +15,7 @@ const {
   verifyIdToken,
 } = require("../utils/lineAuth");
 const { getAppSettings } = require("../utils/appSettings");
+const { VALID_USER_TYPES } = require("../utils/userTypes");
 
 // เอา origin แรกจากรายการ MYAPP_FRONTEND_URL (คั่นด้วยจุลภาคได้หลายค่าตอน dev เช่น
 // "http://localhost:5173,http://localhost:5174,...") มาใช้ตอน redirect กลับเข้าหน้าเว็บ
@@ -158,15 +159,6 @@ exports.login = async (req, res) => {
 };
 
 // --- 2. REGISTER ---
-const VALID_USER_TYPES = [
-  "regulator",
-  "policy",
-  "researcher",
-  "developer",
-  "service provider",
-  "users",
-];
-
 // กลุ่มอุตสาหกรรมของหน่วยงาน (เฉพาะสมัครในฐานะหน่วยงาน)
 const VALID_SECTORS = [
   "government",

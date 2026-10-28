@@ -1,7 +1,70 @@
 const db = require("../db");
 const bcrypt = require("bcryptjs");
-const { isValidUsername, isValidPassword } = require("../utils/validators");
+const crypto = require("crypto");
+const ExcelJS = require("exceljs");
+const {
+  isValidUsername,
+  isValidPassword,
+  isValidPhone,
+} = require("../utils/validators");
 const { getAppSettings } = require("../utils/appSettings");
+const { VALID_USER_TYPES } = require("../utils/userTypes");
+const { generateCertNumber } = require("../utils/certNumber");
+
+// กลุ่มหลักสูตร "ผู้ใช้งานทั่วไป" (course_group ตรงกับ target_group ของ chapters/certificates
+// ที่ใช้อยู่แล้วทั้งระบบ - ดู utils/targetGroup.js) ใช้ตอนออกใบประกาศอัตโนมัติให้ผู้ใช้งานที่นำเข้า
+const IMPORTED_USER_CERT_GROUP = 3;
+
+// ประเทศไทยไม่มี Daylight Saving Time เลยใช้ offset +7 ชั่วโมงคงที่ได้เสมอ ไม่ต้องพึ่ง timezone
+// ของเครื่อง server (dev/uat/prod อาจตั้ง timezone ไม่ตรงกัน เช่น prod รันเป็น UTC)
+const BANGKOK_UTC_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+// สุ่มเวลาออกใบประกาศให้อยู่ในช่วงเวลาทำการ (09:00-17:00 เวลาไทย) ของ "วันที่นำเข้าข้อมูล" แทนที่จะ
+// ใช้เวลาปัจจุบันตรงๆ เหมือนกันทุกแถว เพราะถ้านำเข้าทีละหลายสิบ/ร้อยคนในรอบเดียว ทุกคนจะได้ issued_at
+// เป๊ะวินาทีเดียวกันหมด (NOW() ของ Postgres คืนค่าเวลาเริ่ม transaction ค่าเดียวตลอดทั้ง transaction)
+// ซึ่งดูผิดธรรมชาติเวลาเปิดดูในรายงาน - สุ่มกระจายให้ดูเหมือนทยอยออกทีละคนในวันนั้นแทน
+// (ไม่มีทางได้เวลาในอนาคตเกินตอนนี้จริง กันเคส import ตอนเช้ามากๆ)
+const randomIssuedAtToday = () => {
+  const now = new Date();
+  // บวก offset เข้าไปตรงๆ บน epoch แล้วอ่านค่าแบบ UTC getter - เป็นวิธีมาตรฐานจำลอง "เวลาท้องถิ่นไทย"
+  // แบบไม่ขึ้นกับ timezone ของเครื่องที่รันโค้ดอยู่
+  const nowBangkok = new Date(now.getTime() + BANGKOK_UTC_OFFSET_MS);
+  const dayStartBangkok = new Date(
+    Date.UTC(
+      nowBangkok.getUTCFullYear(),
+      nowBangkok.getUTCMonth(),
+      nowBangkok.getUTCDate(),
+      9,
+      0,
+      0,
+    ),
+  );
+  const dayEndBangkok = new Date(
+    Date.UTC(
+      nowBangkok.getUTCFullYear(),
+      nowBangkok.getUTCMonth(),
+      nowBangkok.getUTCDate(),
+      17,
+      0,
+      0,
+    ),
+  );
+
+  const rangeEndBangkok = nowBangkok < dayEndBangkok ? nowBangkok : dayEndBangkok;
+  const rangeStartBangkok =
+    nowBangkok < dayStartBangkok
+      ? new Date(nowBangkok.getTime() - 5 * 60 * 1000)
+      : dayStartBangkok;
+
+  if (rangeStartBangkok >= rangeEndBangkok) return now;
+
+  const randomBangkokMs =
+    rangeStartBangkok.getTime() +
+    Math.random() * (rangeEndBangkok.getTime() - rangeStartBangkok.getTime());
+
+  // ลบ offset ที่บวกไปตอนแรกออก เพื่อแปลงกลับเป็นเวลาจริง (UTC) ก่อนเก็บลง DB
+  return new Date(randomBangkokMs - BANGKOK_UTC_OFFSET_MS);
+};
 
 // กลุ่มอุตสาหกรรมของหน่วยงาน
 const VALID_SECTORS = [
@@ -2637,5 +2700,545 @@ exports.deleteSelfTrainingVideo = async (req, res) => {
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการลบข้อมูล" });
+  }
+};
+
+// ==========================================
+// ส่งออกข้อมูลผู้ใช้งานเป็นไฟล์ Excel (เฉพาะ role = user เท่านั้น)
+// ==========================================
+
+// สรุปตัวเลขย่อสำหรับแสดงบนหน้าส่งออกข้อมูล ก่อนที่ผู้ดูแลจะกดส่งออกจริง
+exports.getExportUsersSummary = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        (SELECT COUNT(*) FROM users WHERE role = 'user') AS total_users,
+        (SELECT COUNT(DISTINCT c.user_id)
+           FROM certificates c
+           JOIN users u ON u.id = c.user_id
+          WHERE u.role = 'user') AS users_with_certificate
+    `);
+    const row = result.rows[0];
+    res.status(200).json({
+      success: true,
+      data: {
+        totalUsers: parseInt(row.total_users) || 0,
+        usersWithCertificate: parseInt(row.users_with_certificate) || 0,
+      },
+    });
+  } catch (error) {
+    console.error("Get Export Users Summary Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "ไม่สามารถดึงข้อมูลสรุปได้",
+    });
+  }
+};
+
+exports.exportUsersExcel = async (req, res) => {
+  try {
+    // รวมใบประกาศทั้งหมดของแต่ละคนไว้ใน JSON array เดียว (ผู้ใช้ 1 คนอาจมีได้หลายใบ)
+    const result = await db.query(`
+      SELECT
+        u.id,
+        p.first_name_th AS first_name,
+        p.last_name_th AS last_name,
+        p.email,
+        p.mobile,
+        COALESCE(NULLIF(u.user_type, ''), 'ไม่ระบุ') AS user_type,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'courseName', COALESCE(cs.course_name, 'กลุ่ม ' || c.course_group::text),
+              'certNumber', c.cert_number,
+              'issuedAt', to_char(c.issued_at, 'YYYY-MM-DD')
+            ) ORDER BY c.issued_at
+          ) FILTER (WHERE c.id IS NOT NULL),
+          '[]'
+        ) AS certificates
+      FROM users u
+      LEFT JOIN profiles p ON u.id = p.user_id
+      LEFT JOIN certificates c ON c.user_id = u.id
+      LEFT JOIN certificate_settings cs ON c.course_group = cs.course_group
+      WHERE u.role = 'user'
+      GROUP BY u.id, p.first_name_th, p.last_name_th, p.email, p.mobile, u.user_type
+      ORDER BY u.id ASC
+    `);
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "AI Ethics Platform";
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet("ผู้ใช้งาน");
+
+    sheet.columns = [
+      { header: "ลำดับ", key: "no", width: 8 },
+      { header: "ชื่อ", key: "firstName", width: 18 },
+      { header: "นามสกุล", key: "lastName", width: 18 },
+      { header: "อีเมล", key: "email", width: 30 },
+      { header: "เบอร์โทรศัพท์", key: "mobile", width: 16 },
+      { header: "ประเภทผู้ใช้งาน", key: "userType", width: 20 },
+      { header: "สถานะใบประกาศ", key: "certStatus", width: 18 },
+      { header: "จำนวนใบประกาศ", key: "certCount", width: 16 },
+      { header: "รายชื่อใบประกาศที่ได้รับ", key: "certList", width: 55 },
+    ];
+
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true };
+    headerRow.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE2E8F0" },
+    };
+    sheet.views = [{ state: "frozen", ySplit: 1 }];
+
+    result.rows.forEach((row, index) => {
+      const certs = row.certificates || [];
+      const certList = certs
+        .map((c) =>
+          c.certNumber
+            ? `${c.courseName} (เลขที่ ${c.certNumber})`
+            : c.courseName,
+        )
+        .join(", ");
+
+      sheet.addRow({
+        no: index + 1,
+        firstName: row.first_name || "-",
+        lastName: row.last_name || "-",
+        email: row.email || "-",
+        mobile: row.mobile || "-",
+        userType: row.user_type,
+        certStatus: certs.length > 0 ? "ได้รับแล้ว" : "ยังไม่ได้รับ",
+        certCount: certs.length,
+        certList: certList || "-",
+      });
+    });
+
+    sheet.autoFilter = { from: "A1", to: "I1" };
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="users-export-${dateStr}.xlsx"`,
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error("Export Users Excel Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "เกิดข้อผิดพลาดในการส่งออกข้อมูล",
+    });
+  }
+};
+
+// ==========================================
+// นำเข้าข้อมูลผู้ใช้งานจากไฟล์ Excel (เฉพาะ role = user)
+// ==========================================
+
+// สุ่มรหัสผ่านชั่วคราวที่อ่าน/พิมพ์ตามได้ง่าย (ตัดอักขระที่ดูสับสนเช่น 0/O, 1/l/I ออก)
+// เพื่อให้แอดมินนำไปแจ้งเจ้าของบัญชีจริงได้สะดวก
+const TEMP_PASSWORD_CHARSET =
+  "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+const generateTempPassword = (length = 10) => {
+  const bytes = crypto.randomBytes(length);
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += TEMP_PASSWORD_CHARSET[bytes[i] % TEMP_PASSWORD_CHARSET.length];
+  }
+  return result;
+};
+
+// ดาวน์โหลดเทมเพลตเปล่าสำหรับกรอกข้อมูลก่อนนำเข้า (มีแถวตัวอย่าง + ชีทคำอธิบายแยก)
+exports.downloadImportTemplate = async (req, res) => {
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("นำเข้าผู้ใช้งาน");
+
+    sheet.columns = [
+      { header: "ชื่อ", key: "firstName", width: 20 },
+      { header: "นามสกุล", key: "lastName", width: 20 },
+      { header: "อีเมล", key: "email", width: 30 },
+      { header: "เบอร์โทรศัพท์", key: "mobile", width: 16 },
+      { header: "ประเภทผู้ใช้งาน", key: "userType", width: 20 },
+      { header: "รหัสหน่วยงาน", key: "orgCode", width: 20 },
+    ];
+
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true };
+    headerRow.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE2E8F0" },
+    };
+
+    sheet.addRow({
+      firstName: "สมชาย",
+      lastName: "ใจดี",
+      email: "somchai@example.com",
+      mobile: "0812345678",
+      userType: "researcher",
+      orgCode: "",
+    });
+    sheet.getRow(2).font = { italic: true, color: { argb: "FF94A3B8" } };
+
+    const noteSheet = workbook.addWorksheet("คำอธิบาย");
+    noteSheet.columns = [
+      { header: "คอลัมน์", key: "col", width: 22 },
+      { header: "คำอธิบาย", key: "desc", width: 75 },
+    ];
+    noteSheet.getRow(1).font = { bold: true };
+    [
+      ["ชื่อ", "ชื่อจริง (จำเป็นต้องกรอก)"],
+      ["นามสกุล", "นามสกุล (จำเป็นต้องกรอก)"],
+      ["อีเมล", "ต้องไม่ซ้ำกับผู้ใช้งานที่มีอยู่แล้วในระบบ (จำเป็นต้องกรอก)"],
+      ["เบอร์โทรศัพท์", "ตัวเลข 9-10 หลัก ขึ้นต้นด้วย 0 เช่น 0812345678 (จำเป็นต้องกรอก)"],
+      [
+        "ประเภทผู้ใช้งาน",
+        "ต้องเป็นหนึ่งใน: " + VALID_USER_TYPES.join(", ") + " (จำเป็นต้องกรอก)",
+      ],
+      ["รหัสหน่วยงาน", "รหัสหน่วยงานที่มีอยู่แล้วในระบบ เช่น ORG-2601-xxxxx เว้นว่างได้ถ้าไม่สังกัดหน่วยงาน"],
+      ["Username / Password", "ระบบจะสุ่มสร้างให้อัตโนมัติ ไม่ต้องกรอกในไฟล์นี้"],
+      [
+        "ใบประกาศ",
+        "ทุกคนที่นำเข้าสำเร็จจะได้รับใบประกาศกลุ่มผู้ใช้งานทั่วไป (กลุ่ม 3) ให้อัตโนมัติทันที โดยวันที่ออกใบประกาศ = วันที่นำเข้าข้อมูล",
+      ],
+    ].forEach((row) => noteSheet.addRow({ col: row[0], desc: row[1] }));
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="import-users-template.xlsx"',
+    );
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error("Download Import Template Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "ไม่สามารถสร้างไฟล์เทมเพลตได้" });
+  }
+};
+
+// อ่านไฟล์ Excel ที่อัปโหลด ตรวจสอบทีละแถว แล้วเพิ่มเฉพาะแถวที่ผ่านเงื่อนไขทั้งหมด
+// ส่วนแถวที่ซ้ำ/ข้อมูลผิด จะถูกข้ามไปและรายงานกลับไปให้แอดมินดู ไม่ทำให้ทั้งไฟล์ล้มเหลว
+exports.importUsers = async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({
+      success: false,
+      message: "กรุณาเลือกไฟล์ Excel ที่ต้องการนำเข้า",
+    });
+  }
+
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(req.file.buffer);
+    const sheet = workbook.worksheets[0];
+
+    if (!sheet) {
+      return res
+        .status(400)
+        .json({ success: false, message: "ไม่พบข้อมูลในไฟล์ที่อัปโหลด" });
+    }
+
+    const getCellText = (row, col) => {
+      const value = row.getCell(col).value;
+      if (value === null || value === undefined) return "";
+      if (typeof value === "object" && "text" in value) {
+        return String(value.text).trim();
+      }
+      if (typeof value === "object" && "result" in value) {
+        return String(value.result).trim();
+      }
+      return String(value).trim();
+    };
+
+    const rows = [];
+    sheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return; // ข้ามแถว header
+
+      const firstName = getCellText(row, 1);
+      const lastName = getCellText(row, 2);
+      const email = getCellText(row, 3);
+      const mobile = getCellText(row, 4);
+      const userType = getCellText(row, 5);
+      const orgCode = getCellText(row, 6);
+
+      // แถวว่างทั้งแถว (เช่นท้ายไฟล์เหลือพื้นที่ว่างไว้) ข้ามไปเงียบๆ ไม่ต้องรายงานเป็น error
+      if (!firstName && !lastName && !email && !mobile && !userType && !orgCode) {
+        return;
+      }
+
+      rows.push({ rowNumber, firstName, lastName, email, mobile, userType, orgCode });
+    });
+
+    if (rows.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "ไม่พบข้อมูลที่จะนำเข้าในไฟล์" });
+    }
+
+    // ดึง email ที่มีอยู่แล้วทั้งหมดมาเช็คซ้ำรวดเดียว (เร็วกว่า query ทีละแถว)
+    const existingEmailsResult = await db.query(
+      "SELECT LOWER(email) AS email FROM profiles",
+    );
+    const existingEmailSet = new Set(
+      existingEmailsResult.rows.map((r) => r.email),
+    );
+
+    const orgResult = await db.query("SELECT id, org_code FROM organizations");
+    const orgCodeMap = new Map(
+      orgResult.rows.map((o) => [o.org_code.toLowerCase(), o.id]),
+    );
+
+    const seenEmailsInFile = new Set();
+    const toInsert = [];
+    const skipped = [];
+
+    for (const row of rows) {
+      const emailLower = row.email.toLowerCase();
+
+      if (!row.firstName || !row.lastName) {
+        skipped.push({ ...row, reason: "ไม่ได้กรอกชื่อหรือนามสกุล" });
+        continue;
+      }
+      if (!row.email) {
+        skipped.push({ ...row, reason: "ไม่ได้กรอกอีเมล" });
+        continue;
+      }
+      if (!isValidPhone(row.mobile)) {
+        skipped.push({
+          ...row,
+          reason: "เบอร์โทรศัพท์ไม่ถูกต้อง (ต้องเป็นตัวเลข 9-10 หลัก ขึ้นต้นด้วย 0)",
+        });
+        continue;
+      }
+      if (!VALID_USER_TYPES.includes(row.userType)) {
+        skipped.push({ ...row, reason: "ประเภทผู้ใช้งานไม่ถูกต้อง" });
+        continue;
+      }
+      if (existingEmailSet.has(emailLower)) {
+        skipped.push({ ...row, reason: "อีเมลนี้มีอยู่ในระบบแล้ว" });
+        continue;
+      }
+      if (seenEmailsInFile.has(emailLower)) {
+        skipped.push({ ...row, reason: "อีเมลซ้ำกันเองภายในไฟล์ที่อัปโหลด" });
+        continue;
+      }
+
+      let orgId = null;
+      if (row.orgCode) {
+        orgId = orgCodeMap.get(row.orgCode.toLowerCase()) || null;
+        if (!orgId) {
+          skipped.push({
+            ...row,
+            reason: `ไม่พบหน่วยงานที่มีรหัส "${row.orgCode}" ในระบบ`,
+          });
+          continue;
+        }
+      }
+
+      seenEmailsInFile.add(emailLower);
+      toInsert.push({ ...row, orgId });
+    }
+
+    let insertedCount = 0;
+
+    if (toInsert.length > 0) {
+      const client = await db.getClient();
+      try {
+        await client.query("BEGIN");
+
+        for (const row of toInsert) {
+          // สุ่ม username ไม่ให้ชนกับที่มีอยู่แล้ว (กันเคสสุ่มชนกันเองข้ามรอบ import)
+          let username = null;
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const candidate = `imp_${crypto.randomBytes(5).toString("hex")}`;
+            const checkUsername = await client.query(
+              "SELECT id FROM users WHERE username = $1",
+              [candidate],
+            );
+            if (checkUsername.rows.length === 0) {
+              username = candidate;
+              break;
+            }
+          }
+          if (!username) {
+            skipped.push({ ...row, reason: "สร้าง Username ให้ไม่สำเร็จ กรุณาลองนำเข้าแถวนี้อีกครั้ง" });
+            continue;
+          }
+
+          const plainPassword = generateTempPassword();
+          const hashedPassword = await bcrypt.hash(plainPassword, 10);
+
+          const insertUser = await client.query(
+            `INSERT INTO users (username, password, role, organization_id, user_type, imported_at)
+             VALUES ($1, $2, 'user', $3, $4, NOW()) RETURNING id`,
+            [username, hashedPassword, row.orgId, row.userType],
+          );
+          const newUserId = insertUser.rows[0].id;
+
+          const date = new Date();
+          const yy = String(date.getFullYear()).slice(-2);
+          const mm = String(date.getMonth() + 1).padStart(2, "0");
+          const userCode = `USR-${yy}${mm}-${String(newUserId).padStart(5, "0")}`;
+
+          await client.query(
+            `INSERT INTO profiles
+               (user_id, user_code, first_name_th, last_name_th, email, mobile, temp_password, is_verified)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+            [
+              newUserId,
+              userCode,
+              row.firstName,
+              row.lastName,
+              row.email,
+              row.mobile,
+              plainPassword,
+            ],
+          );
+
+          // ออกใบประกาศกลุ่มผู้ใช้งานทั่วไป (กลุ่ม 3) ให้อัตโนมัติทุกคนที่นำเข้าผ่านไฟล์นี้ - ไม่ต้อง
+          // รอสอบผ่านผ่านแอปเหมือน flow ปกติ เพราะคนกลุ่มนี้ถือว่าผ่านเกณฑ์มาจากนอกระบบแล้ว
+          const certNumber = await generateCertNumber(
+            row.userType,
+            IMPORTED_USER_CERT_GROUP,
+          );
+          await client.query(
+            `INSERT INTO certificates (user_id, course_group, issued_at, cert_number)
+             VALUES ($1, $2, $3, $4)`,
+            [newUserId, IMPORTED_USER_CERT_GROUP, randomIssuedAtToday(), certNumber],
+          );
+
+          insertedCount++;
+        }
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        insertedCount,
+        skippedCount: skipped.length,
+        skipped: skipped.map((s) => ({
+          row: s.rowNumber,
+          firstName: s.firstName,
+          lastName: s.lastName,
+          email: s.email,
+          reason: s.reason,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Import Users Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการนำเข้าข้อมูล" });
+  }
+};
+
+// รายชื่อผู้ใช้งานที่สร้างผ่านการนำเข้าไฟล์เท่านั้น (ไม่รวมคนที่สมัครเข้ามาเอง) พร้อม username/
+// password ชั่วคราว ไว้ให้แอดมินดูและแก้ไขเพื่อนำไปแจ้งเจ้าของบัญชีจริงทีหลัง
+exports.getImportedUsers = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        u.id,
+        u.username,
+        u.imported_at,
+        u.user_type,
+        p.first_name_th,
+        p.last_name_th,
+        p.email,
+        p.mobile,
+        p.temp_password,
+        o.org_name
+      FROM users u
+      LEFT JOIN profiles p ON u.id = p.user_id
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      WHERE u.imported_at IS NOT NULL
+      ORDER BY u.imported_at DESC
+    `);
+    res.status(200).json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get Imported Users Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "ไม่สามารถดึงข้อมูลผู้ใช้งานที่นำเข้าได้",
+    });
+  }
+};
+
+// แก้ไข username/password ของผู้ใช้งานที่นำเข้ามา (เฉพาะ user ที่มี imported_at เท่านั้น)
+exports.updateImportedUserCredentials = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { username, password } = req.body;
+
+    if (!isValidUsername(username)) {
+      return res.status(400).json({
+        success: false,
+        message: "ชื่อผู้ใช้งานต้องเป็นภาษาอังกฤษ ตัวเลข หรือ . _ - เท่านั้น (ห้ามใช้ภาษาไทย)",
+      });
+    }
+    if (!isValidPassword(password)) {
+      return res.status(400).json({
+        success: false,
+        message: "รหัสผ่านต้องเป็นภาษาอังกฤษเท่านั้น (ห้ามใช้ภาษาไทย)",
+      });
+    }
+
+    const checkUser = await db.query(
+      "SELECT id FROM users WHERE username = $1 AND id != $2",
+      [username, id],
+    );
+    if (checkUser.rows.length > 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "ชื่อผู้ใช้งานนี้ถูกใช้ไปแล้ว" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const updateUser = await db.query(
+      `UPDATE users SET username = $1, password = $2
+       WHERE id = $3 AND imported_at IS NOT NULL RETURNING id`,
+      [username, hashedPassword, id],
+    );
+    if (updateUser.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบผู้ใช้งานนี้ในรายการที่นำเข้า" });
+    }
+
+    await db.query("UPDATE profiles SET temp_password = $1 WHERE user_id = $2", [
+      password,
+      id,
+    ]);
+
+    res
+      .status(200)
+      .json({ success: true, message: "แก้ไขข้อมูลเข้าสู่ระบบเรียบร้อยแล้ว" });
+  } catch (error) {
+    console.error("Update Imported User Credentials Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการแก้ไขข้อมูล" });
   }
 };

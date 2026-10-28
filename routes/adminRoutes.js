@@ -2,6 +2,7 @@ const express = require("express");
 const adminControllers = require("../controllers/adminControllers");
 const alumniControllers = require("../controllers/alumniControllers");
 const { verifyToken, requireRole } = require("../middlewares/authMiddlewares");
+const { uploadExcelMiddleware } = require("../utils/uploadMiddleware");
 const router = express.Router();
 
 // ทุก route ในไฟล์นี้ต้องเป็น role admin เท่านั้น
@@ -232,6 +233,41 @@ router.delete(
   "/self-training/delete/:id",
   verifyToken,
   adminControllers.deleteSelfTrainingVideo,
+);
+
+// ส่งออกข้อมูลผู้ใช้งาน (เฉพาะ role = user) เป็นไฟล์ Excel
+router.get(
+  "/export-users-summary",
+  verifyToken,
+  adminControllers.getExportUsersSummary,
+);
+router.get(
+  "/export-users-excel",
+  verifyToken,
+  adminControllers.exportUsersExcel,
+);
+
+// นำเข้าข้อมูลผู้ใช้งานจากไฟล์ Excel
+router.get(
+  "/import-users-template",
+  verifyToken,
+  adminControllers.downloadImportTemplate,
+);
+router.post(
+  "/import-users",
+  verifyToken,
+  uploadExcelMiddleware,
+  adminControllers.importUsers,
+);
+router.get(
+  "/imported-users",
+  verifyToken,
+  adminControllers.getImportedUsers,
+);
+router.put(
+  "/imported-users/:id/credentials",
+  verifyToken,
+  adminControllers.updateImportedUserCredentials,
 );
 
 module.exports = router;

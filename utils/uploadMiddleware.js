@@ -61,8 +61,49 @@ const uploadProfileImageMiddleware = (req, res, next) => {
   });
 };
 
+// --- อัปโหลดไฟล์ Excel สำหรับนำเข้าข้อมูลผู้ใช้งาน (เก็บไว้ใน memory ชั่วคราวเท่านั้น ไม่เขียนลง
+// disk เพราะอ่านจบแล้วก็ insert เข้า DB เลย ไม่ต้องเก็บไฟล์ต้นฉบับไว้) ---
+const EXCEL_MIME_TYPES = {
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
+};
+
+// 5MB เพียงพอสำหรับไฟล์รายชื่อผู้ใช้งานหลักพันแถว
+const MAX_EXCEL_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+
+const excelFileFilter = (req, file, cb) => {
+  if (!EXCEL_MIME_TYPES[file.mimetype]) {
+    return cb(new Error("รองรับเฉพาะไฟล์ .xlsx เท่านั้น"));
+  }
+  cb(null, true);
+};
+
+const uploadExcel = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: excelFileFilter,
+  limits: { fileSize: MAX_EXCEL_FILE_SIZE_BYTES },
+});
+
+const uploadExcelMiddleware = (req, res, next) => {
+  uploadExcel.single("file")(req, res, (err) => {
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        success: false,
+        message: `ไฟล์มีขนาดใหญ่เกินไป (ไม่เกิน ${MAX_EXCEL_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
+      });
+    }
+    if (err) {
+      return res.status(400).json({
+        success: false,
+        message: err.message || "ไม่สามารถอัปโหลดไฟล์ได้",
+      });
+    }
+    next();
+  });
+};
+
 module.exports = {
   uploadProfileImageMiddleware,
+  uploadExcelMiddleware,
   UPLOAD_DIR,
   MAX_FILE_SIZE_BYTES,
 };
