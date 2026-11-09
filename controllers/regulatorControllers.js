@@ -1543,7 +1543,9 @@ exports.getRegulatorCertificates = async (req, res) => {
         c.id as cert_id, c.course_group, c.issued_at, c.cert_number,
         cs.course_name, cs.signatory_name, cs.signatory_position,
         cs.background_url, cs.logo_url, cs.signature_url,
-        cs.issuer_name, cs.description
+        cs.issuer_name, cs.description,
+        (SELECT to_char(MIN(s.training_date), 'YYYY-MM-DD') FROM user_onsite_submissions s WHERE s.account_id = c.user_id) AS training_start,
+        (SELECT to_char(MAX(s.training_date), 'YYYY-MM-DD') FROM user_onsite_submissions s WHERE s.account_id = c.user_id) AS training_end
       FROM certificates c
       LEFT JOIN certificate_settings cs ON c.course_group = cs.course_group
       WHERE c.user_id = $1
@@ -1575,7 +1577,14 @@ exports.getRegulatorCertificates = async (req, res) => {
         return {
           certId: cert.cert_id,
           certNumber: cert.cert_number,
-          course_name: cert.course_name || "AI Ethics Management",
+          courseGroup: cert.course_group,
+          trainingStart: cert.training_start,
+          trainingEnd: cert.training_end,
+          course_name:
+            cert.course_name ||
+            (cert.course_group === 4
+              ? "กิจกรรมฝึกอบรมหลักสูตรจริยธรรมปัญญาประดิษฐ์ในภาคปฏิบัติ (Workshop)"
+              : "AI Ethics Management"),
           signatory_name: cert.signatory_name,
           signatory_position: cert.signatory_position,
           background_url: cert.background_url,
