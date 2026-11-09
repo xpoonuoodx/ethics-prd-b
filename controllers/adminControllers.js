@@ -10,6 +10,7 @@ const {
 const { getAppSettings } = require("../utils/appSettings");
 const { VALID_USER_TYPES } = require("../utils/userTypes");
 const { generateCertNumber } = require("../utils/certNumber");
+const rateLimitMiddlewares = require("../middlewares/rateLimitMiddlewares");
 
 // กลุ่มหลักสูตร "ผู้ใช้งานทั่วไป" (course_group ตรงกับ target_group ของ chapters/certificates
 // ที่ใช้อยู่แล้วทั้งระบบ - ดู utils/targetGroup.js) ใช้ตอนออกใบประกาศอัตโนมัติให้ผู้ใช้งานที่นำเข้า
@@ -2355,6 +2356,62 @@ exports.updateSettings = async (req, res) => {
     res.status(200).json({ success: true, message: "บันทึกการตั้งค่าสำเร็จ" });
   } catch (error) {
     console.error("Update Settings Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกการตั้งค่า" });
+  }
+};
+
+// --- ดึงค่าตั้งค่า rate limit ทุกตัวในระบบ (login, register, forgot/reset password, ฯลฯ) ---
+exports.getRateLimitSettings = async (req, res) => {
+  try {
+    res.status(200).json({
+      success: true,
+      data: rateLimitMiddlewares.getRateLimitSettingsList(),
+    });
+  } catch (error) {
+    console.error("Get Rate Limit Settings Error:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "เกิดข้อผิดพลาดในการดึงค่าตั้งค่า rate limit" });
+  }
+};
+
+// --- เปิด/ปิด rate limit ตัวใดตัวหนึ่ง และ/หรือตั้งระยะเวลา (นาที) ใหม่ ---
+// มีผลทันทีโดยไม่ต้อง restart server (ดู applyRateLimitSetting ใน middlewares/rateLimitMiddlewares.js)
+exports.updateRateLimitSetting = async (req, res) => {
+  try {
+    const { key } = req.params;
+    const { enabled, windowMinutes } = req.body;
+
+    if (!rateLimitMiddlewares.LIMITER_KEYS.includes(key)) {
+      return res
+        .status(404)
+        .json({ success: false, message: "ไม่พบ rate limit ตัวนี้" });
+    }
+    if (typeof enabled !== "boolean") {
+      return res
+        .status(400)
+        .json({ success: false, message: "กรุณาระบุสถานะเปิด/ปิดให้ถูกต้อง" });
+    }
+    const minutes = Number(windowMinutes);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาระบุระยะเวลาเป็นจำนวนเต็ม 1-1440 นาที",
+      });
+    }
+
+    await db.query(
+      `UPDATE rate_limit_settings SET enabled = $1, window_minutes = $2, updated_at = CURRENT_TIMESTAMP WHERE limiter_key = $3`,
+      [enabled, minutes, key],
+    );
+
+    rateLimitMiddlewares.applyRateLimitSetting(key, { enabled, windowMinutes: minutes });
+
+    res.status(200).json({ success: true, message: "บันทึกการตั้งค่าสำเร็จ" });
+  } catch (error) {
+    console.error("Update Rate Limit Setting Error:", error);
     res
       .status(500)
       .json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกการตั้งค่า" });

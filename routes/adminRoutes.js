@@ -195,6 +195,19 @@ router.get(
 // หน้า "ตั้งค่าระบบ"
 router.get("/settings", verifyToken, adminControllers.getSettings);
 router.put("/settings", verifyToken, adminControllers.updateSettings);
+
+// เปิด/ปิด rate limit แต่ละตัว + ตั้งระยะเวลา (นาที) เอง (เผื่อช่วงเปิดรับสมัคร workshop
+// ที่มีคนสมัคร/login พร้อมกันจำนวนมาก)
+router.get(
+  "/rate-limit-settings",
+  verifyToken,
+  adminControllers.getRateLimitSettings,
+);
+router.put(
+  "/rate-limit-settings/:key",
+  verifyToken,
+  adminControllers.updateRateLimitSetting,
+);
 router.put(
   "/change-password",
   verifyToken,
